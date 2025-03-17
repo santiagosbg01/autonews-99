@@ -17,13 +17,20 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: Setup Chrome
-      uses: browser-actions/setup-chrome@v1
-      with:
-        chrome-version: stable
-    
-    - name: Setup ChromeDriver
-      uses: nanasess/setup-chromedriver@v2
+    - name: Setup Chrome and ChromeDriver
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/sources.list.d/google.list'
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | awk -F'.' '{print $1}')
+        CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION")
+        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
+        unzip chromedriver_linux64.zip
+        chmod +x chromedriver
+        sudo mv chromedriver /usr/local/bin/
+        echo "CHROME_VERSION=$CHROME_VERSION" >> $GITHUB_ENV
+        echo "CHROMEDRIVER_VERSION=$CHROMEDRIVER_VERSION" >> $GITHUB_ENV
     
     - name: Start XVFB
       run: |
@@ -50,10 +57,12 @@ jobs:
         google-chrome --version
         echo "ChromeDriver version:"
         chromedriver --version
+        echo "ChromeDriver path:"
+        which chromedriver
         echo "Starting news monitor..."
         python main.py
       env:
         PYTHONUNBUFFERED: 1
         DISPLAY: :99
-        CHROME_BIN: google-chrome
-        CHROMEDRIVER_PATH: chromedriver 
+        CHROME_BIN: /usr/bin/google-chrome
+        CHROMEDRIVER_PATH: /usr/local/bin/chromedriver 

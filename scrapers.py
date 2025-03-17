@@ -86,28 +86,36 @@ class BaseScraper:
         }
 
     def get_selenium_driver(self):
+        """Configure and return a Chrome WebDriver instance."""
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument(f'user-agent={self.ua.random}')
         
-        # Check if running in GitHub Actions
-        if os.getenv('GITHUB_ACTIONS'):
-            # Use the ChromeDriver installed by the workflow
-            chrome_binary = os.getenv('CHROME_BIN', '/usr/bin/chromium-browser')
-            chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
-            chrome_options.binary_location = chrome_binary
-            service = Service(executable_path=chromedriver_path)
-        else:
-            # Use WebDriver Manager for local development
-            service = Service(ChromeDriverManager().install())
-        
         try:
+            if os.getenv('GITHUB_ACTIONS'):
+                # Use system-installed ChromeDriver in GitHub Actions
+                chrome_binary = os.getenv('CHROME_BIN', '/usr/bin/google-chrome')
+                chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
+                
+                logging.info(f"Using Chrome binary: {chrome_binary}")
+                logging.info(f"Using ChromeDriver path: {chromedriver_path}")
+                
+                chrome_options.binary_location = chrome_binary
+                service = Service(executable_path=chromedriver_path)
+            else:
+                # Use WebDriver Manager for local development
+                service = Service(ChromeDriverManager().install())
+            
             driver = webdriver.Chrome(service=service, options=chrome_options)
             return driver
+            
         except Exception as e:
             logging.error(f"Failed to initialize Chrome driver: {str(e)}")
+            logging.error(f"Chrome binary location: {chrome_options.binary_location}")
+            logging.error(f"Environment variables: {dict(os.environ)}")
             raise
 
     def load_cache(self):
