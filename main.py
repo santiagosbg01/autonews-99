@@ -20,6 +20,7 @@ from config import (
     STORAGE_FILE
 )
 from scrapers import get_all_scrapers
+from selenium import webdriver
 
 def setup_logging():
     """Configure logging."""
@@ -52,6 +53,21 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     return logger
+
+def setup_chrome_options():
+    """Configure Chrome options for both local and CI environments."""
+    chrome_options = webdriver.ChromeOptions()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    
+    # Set binary location if specified in environment
+    chrome_binary = os.getenv('CHROME_BIN')
+    if chrome_binary:
+        chrome_options.binary_location = chrome_binary
+    
+    return chrome_options
 
 def summarize_text(text):
     """Generate a summary using OpenAI's API."""
