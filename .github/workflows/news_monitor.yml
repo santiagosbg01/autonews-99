@@ -24,16 +24,30 @@ jobs:
         sudo mkdir -p /etc/apt/keyrings
         wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
         echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
+        sudo apt-get update || echo "apt-get update failed but continuing..."
+        sudo apt-get install -y google-chrome-stable || (echo "Chrome installation failed" && exit 1)
+        
+        # Get Chrome version and install matching ChromeDriver
         CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | awk -F'.' '{print $1}')
-        CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION")
-        wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
-        unzip chromedriver_linux64.zip
-        chmod +x chromedriver
-        sudo mv chromedriver /usr/local/bin/
-        echo "CHROME_VERSION=$CHROME_VERSION" >> $GITHUB_ENV
-        echo "CHROMEDRIVER_VERSION=$CHROMEDRIVER_VERSION" >> $GITHUB_ENV
+        echo "Chrome version: $CHROME_VERSION"
+        
+        # Download and install ChromeDriver
+        CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_$CHROME_VERSION")
+        echo "ChromeDriver version: $CHROMEDRIVER_VERSION"
+        wget -q "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/$CHROMEDRIVER_VERSION/linux64/chromedriver-linux64.zip"
+        unzip chromedriver-linux64.zip
+        sudo mv chromedriver-linux64/chromedriver /usr/local/bin/
+        sudo chmod +x /usr/local/bin/chromedriver
+        
+        # Verify installations
+        echo "Chrome version installed:"
+        google-chrome --version
+        echo "ChromeDriver version installed:"
+        chromedriver --version
+        
+        # Set environment variables
+        echo "CHROME_BIN=/usr/bin/google-chrome" >> $GITHUB_ENV
+        echo "CHROMEDRIVER_PATH=/usr/local/bin/chromedriver" >> $GITHUB_ENV
     
     - name: Start XVFB
       run: |
@@ -56,16 +70,11 @@ jobs:
     
     - name: Run news monitor with debug output
       run: |
-        echo "Chrome version:"
-        google-chrome --version
-        echo "ChromeDriver version:"
-        chromedriver --version
-        echo "ChromeDriver path:"
-        which chromedriver
+        echo "Environment variables:"
+        env | grep -i chrome || true
+        echo "Python location: $(which python)"
         echo "Starting news monitor..."
         python main.py
       env:
         PYTHONUNBUFFERED: 1
-        DISPLAY: :99
-        CHROME_BIN: /usr/bin/google-chrome
-        CHROMEDRIVER_PATH: /usr/local/bin/chromedriver 
+        DISPLAY: :99 
