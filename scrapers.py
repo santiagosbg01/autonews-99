@@ -91,8 +91,24 @@ class BaseScraper:
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument(f'user-agent={self.ua.random}')
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Check if running in GitHub Actions
+        if os.getenv('GITHUB_ACTIONS'):
+            # Use the ChromeDriver installed by the workflow
+            chrome_binary = os.getenv('CHROME_BIN', '/usr/bin/chromium-browser')
+            chromedriver_path = os.getenv('CHROMEDRIVER_PATH', '/usr/bin/chromedriver')
+            chrome_options.binary_location = chrome_binary
+            service = Service(executable_path=chromedriver_path)
+        else:
+            # Use WebDriver Manager for local development
+            service = Service(ChromeDriverManager().install())
+        
+        try:
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            return driver
+        except Exception as e:
+            logging.error(f"Failed to initialize Chrome driver: {str(e)}")
+            raise
 
     def load_cache(self):
         if os.path.exists(self.cache_file):
