@@ -1,0 +1,30 @@
+[project]
+name = "woi-reporter"
+version = "1.0.0"
+description = "WOI — reporte diario a Google Sheet + Slack DM link (9pm CDMX)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gspread>=6.1.0",
+    "google-auth>=2.34.0",
+    "psycopg[binary]>=3.2.3",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.3",
+    "structlog>=24.4.0",
+    "pytz>=2024.2",
+    "click>=8.1.7",
+    "woi-analyzer"
+]
+
+[project.scripts]
+woi-report = "woi_reporter.cli:main"
+
+[tool.uv.sources]
+woi-analyzer = { path = "../woi-analyzer", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/woi_reporter"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

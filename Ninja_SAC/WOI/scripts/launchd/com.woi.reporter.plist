@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.woi.reporter</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>cd /Users/Santiago/Desktop/Ai/Ninja_SAC/WOI/woi-reporter &amp;&amp; .venv/bin/woi-report run &gt;&gt; /Users/Santiago/Desktop/Ai/Ninja_SAC/WOI/logs/reporter.log 2&gt;&amp;1</string>
+  </array>
+
+  <!-- 9:00 PM CDMX diario, 1 hora después del analyzer -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>21</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/Santiago/Desktop/Ai/Ninja_SAC/WOI/logs/reporter.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/Santiago/Desktop/Ai/Ninja_SAC/WOI/logs/reporter.stderr.log</string>
+</dict>
+</plist>

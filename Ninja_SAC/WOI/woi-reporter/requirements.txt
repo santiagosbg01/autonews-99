@@ -1,0 +1,10 @@
+gspread>=6.1.0
+google-auth>=2.34.0
+psycopg[binary]>=3.2.3
+python-dotenv>=1.0.1
+requests>=2.32.3
+structlog>=24.4.0
+pytz>=2024.2
+click>=8.1.7
+# Instala woi-analyzer en modo editable desde ../woi-analyzer
+-e ../woi-analyzer

@@ -1,0 +1,278 @@
+"""Wrapper para Anthropic SDK con prompt caching y retries."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from anthropic import Anthropic, APIError, RateLimitError
+from pydantic import BaseModel, Field, ValidationError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from woi_analyzer.config import CONFIG
+from woi_analyzer.logging_setup import log
+
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+_client: Anthropic | None = None
+
+
+def get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        _client = Anthropic(api_key=CONFIG.anthropic.api_key)
+    return _client
+
+
+def _read_prompt(filename: str) -> str:
+    return (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Response schemas
+# ---------------------------------------------------------------------------
+VALID_CATEGORIES = {
+    # Bucket A (7)
+    "presentacion_unidad", "presentacion_chofer", "presentacion_auxiliar",
+    "confirmacion_llegada", "confirmacion_salida", "reporte_entrega",
+    "confirmacion_evidencias",
+    # Bucket B (9)
+    "problema_unidad", "problema_horario", "problema_entrada", "problema_salida",
+    "problema_trafico", "problema_manifestacion", "robo_incidencia",
+    "problema_sistema", "problema_proveedor",
+    # Bucket C (5)
+    "acuse_recibo", "confirmacion_resolucion", "consulta_info", "saludo_ruido", "otro",
+}
+
+CATEGORY_TO_BUCKET = {
+    **{c: "A" for c in [
+        "presentacion_unidad", "presentacion_chofer", "presentacion_auxiliar",
+        "confirmacion_llegada", "confirmacion_salida", "reporte_entrega",
+        "confirmacion_evidencias",
+    ]},
+    **{c: "B" for c in [
+        "problema_unidad", "problema_horario", "problema_entrada", "problema_salida",
+        "problema_trafico", "problema_manifestacion", "robo_incidencia",
+        "problema_sistema", "problema_proveedor",
+    ]},
+    **{c: "C" for c in [
+        "acuse_recibo", "confirmacion_resolucion", "consulta_info", "saludo_ruido", "otro",
+    ]},
+}
+
+
+class ClassificationResult(BaseModel):
+    category: str
+    bucket: str = Field(pattern="^[ABC]$")
+    sentiment: float = Field(ge=-1.0, le=1.0)
+    urgency: str = Field(pattern="^(baja|media|alta)$")
+    is_incident_open: bool
+    is_incident_close: bool
+    reasoning: str = ""
+
+    def coerce_bucket(self) -> "ClassificationResult":
+        """Si el modelo devolvió un bucket inconsistente con la categoría, lo corregimos."""
+        expected = CATEGORY_TO_BUCKET.get(self.category)
+        if expected and expected != self.bucket:
+            log.warning(
+                "bucket_mismatch_corrected",
+                category=self.category,
+                model_bucket=self.bucket,
+                expected_bucket=expected,
+            )
+            return self.model_copy(update={"bucket": expected})
+        return self
+
+
+# ---------------------------------------------------------------------------
+# JSON extraction (defensive)
+# ---------------------------------------------------------------------------
+def _extract_json(text: str) -> dict[str, Any]:
+    """Extrae el primer objeto JSON del texto. Tolera fences ```json ... ```."""
+    t = text.strip()
+    if t.startswith("```"):
+        first_brace = t.find("{")
+        last_brace = t.rfind("}")
+        if first_brace != -1 and last_brace != -1:
+            t = t[first_brace : last_brace + 1]
+    # Intentar parse directo
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        pass
+    # Fallback: buscar primer {...} balanceado
+    start = t.find("{")
+    if start == -1:
+        raise ValueError(f"No JSON object found in response: {text[:200]!r}")
+    depth = 0
+    for i, ch in enumerate(t[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(t[start : i + 1])
+    raise ValueError(f"Unbalanced JSON: {text[:200]!r}")
+
+
+# ---------------------------------------------------------------------------
+# Classify
+# ---------------------------------------------------------------------------
+def _build_user_content(
+    *,
+    few_shot: str,
+    group_name: str,
+    country: str,
+    timezone: str,
+    sender_role: str,
+    sender_phone_last4: str,
+    timestamp: str,
+    context_messages: list[dict[str, Any]],
+    message_content: str,
+) -> str:
+    ctx_lines = []
+    for m in context_messages:
+        role = m.get("sender_role") or "otro"
+        name = m.get("sender_display_name") or m.get("sender_phone", "")
+        content = (m.get("content") or f"[{m.get('media_type') or 'media'}]")[:200]
+        ctx_lines.append(f"[{role}] {name}: {content}")
+    ctx_block = "\n".join(ctx_lines) if ctx_lines else "(sin mensajes previos recientes)"
+
+    return (
+        f"{few_shot}\n\n"
+        f"---\n\n"
+        f"Group: {group_name}\n"
+        f"Country: {country}\n"
+        f"Timezone: {timezone}\n"
+        f"Sender role: {sender_role}\n"
+        f"Sender phone (last 4): {sender_phone_last4}\n"
+        f"Timestamp: {timestamp}\n"
+        f"Previous messages (chronological, oldest first):\n"
+        f"{ctx_block}\n\n"
+        f'Message to classify:\n"{message_content}"\n\n'
+        f"Return the JSON object now."
+    )
+
+
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APIError)),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+def classify_message(
+    *,
+    group_name: str,
+    country: str,
+    timezone: str,
+    sender_role: str,
+    sender_phone: str,
+    timestamp: str,
+    context_messages: list[dict[str, Any]],
+    message_content: str,
+    model: str | None = None,
+    use_sonnet: bool = False,
+) -> tuple[ClassificationResult, dict[str, Any], dict[str, Any]]:
+    """
+    Clasifica un mensaje. Devuelve (result, claude_raw_dict, usage_dict).
+    - use_sonnet=True activa ground-truth con Sonnet (no cache para avoid stampede).
+    """
+    system_prompt = _read_prompt("classification_system.md")
+    few_shot = _read_prompt("few_shot_examples.md")
+
+    user_content = _build_user_content(
+        few_shot=few_shot,
+        group_name=group_name,
+        country=country,
+        timezone=timezone,
+        sender_role=sender_role,
+        sender_phone_last4=sender_phone[-4:] if sender_phone else "????",
+        timestamp=timestamp,
+        context_messages=context_messages,
+        message_content=message_content,
+    )
+
+    chosen_model = model or (
+        CONFIG.anthropic.sonnet_model if use_sonnet else CONFIG.anthropic.haiku_model
+    )
+
+    system_block = [
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+    response = get_client().messages.create(
+        model=chosen_model,
+        max_tokens=CONFIG.anthropic.max_tokens_classify,
+        system=system_block,
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    if not response.content:
+        raise RuntimeError(f"Empty response from Claude: {response}")
+
+    text = "".join(
+        getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text"
+    )
+
+    try:
+        data = _extract_json(text)
+        result = ClassificationResult.model_validate(data).coerce_bucket()
+    except (ValueError, ValidationError) as e:
+        log.error("classification_parse_failed", error=str(e), response_text=text[:500])
+        raise
+
+    if result.category not in VALID_CATEGORIES:
+        log.warning("invalid_category_coerced_to_otro", original=result.category)
+        result = result.model_copy(update={"category": "otro", "bucket": "C"})
+
+    usage = {
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+        "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
+    }
+    raw_dict = {
+        "id": response.id,
+        "model": response.model,
+        "stop_reason": response.stop_reason,
+        "text": text,
+    }
+    return result, raw_dict, usage
+
+
+# ---------------------------------------------------------------------------
+# Daily summary (Sonnet)
+# ---------------------------------------------------------------------------
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APIError)),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def generate_daily_summary(input_data: dict[str, Any]) -> str:
+    """Genera el brief ejecutivo con Sonnet."""
+    system_prompt = _read_prompt("daily_summary.md")
+    user_content = (
+        "Input data del día (JSON):\n\n"
+        f"```json\n{json.dumps(input_data, ensure_ascii=False, indent=2, default=str)}\n```\n\n"
+        "Genera el brief en el formato indicado."
+    )
+    response = get_client().messages.create(
+        model=CONFIG.anthropic.sonnet_model,
+        max_tokens=CONFIG.anthropic.max_tokens_summary,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_content}],
+    )
+    return "".join(
+        getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+    ).strip()

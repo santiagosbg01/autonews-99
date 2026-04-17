@@ -1,0 +1,9 @@
+anthropic>=0.39.0
+supabase>=2.9.1
+psycopg[binary]>=3.2.3
+python-dotenv>=1.0.1
+pydantic>=2.9.2
+tenacity>=9.0.0
+structlog>=24.4.0
+pytz>=2024.2
+click>=8.1.7
