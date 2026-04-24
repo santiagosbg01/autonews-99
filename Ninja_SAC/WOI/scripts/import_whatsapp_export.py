@@ -28,8 +28,8 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-SUPABASE_URL = "https://tajtivdgtzptcgczmxzr.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhanRpdmRndHpwdGNnY3pteHpyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NjY4OTg0NSwiZXhwIjoyMDkyMjY1ODQ1fQ.Uxj5WdKjbcX6nlJUgFObKUh_GlgHOCXoHU8e4RkYW08"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
