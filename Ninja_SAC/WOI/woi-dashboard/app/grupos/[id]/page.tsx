@@ -112,7 +112,7 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
         {[
           { label: 'Mensajes', value: messages.length, sub: 'últimos 60' },
           { label: 'Incidencias abiertas', value: openIncidents.length, color: openIncidents.length > 0 ? 'var(--warning)' : 'var(--success)' },
-          { label: 'Problemas (B)', value: bucketB, color: bucketB > 5 ? 'var(--danger)' : 'var(--warning)' },
+          { label: 'Incidencias', value: bucketB, color: bucketB > 5 ? 'var(--danger)' : 'var(--warning)' },
           { label: 'Sentiment prom', value: avgSentiment !== null ? (avgSentiment > 0 ? '+' : '') + avgSentiment.toFixed(2) : '—', color: sentColor(avgSentiment) },
           { label: 'Participantes', value: participants.length, sub: `${agents.length} agentes · ${clients.length} clientes` },
         ].map(s => (
@@ -386,14 +386,14 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
           <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
             <h2 style={{ fontSize: 14, fontWeight: 600 }}>Historial de KPIs diarios</h2>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-              Sentiment cliente · Ratio B · TTFR — últimos 30 días
+              Sentiment cliente · % Incidencias · TTFR — últimos 30 días
             </p>
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 700 }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
-                  {['Fecha', 'Msgs', 'A / B / C', 'Ratio B', 'Sentiment cliente', 'TTFR avg', 'TTFR p90', 'TTR avg', 'Riesgo'].map(h => (
+                  {['Fecha', 'Msgs', 'Op / Inc / Ruido', '% Incidencias', 'Sentiment cliente', 'TTFR avg', 'TTFR p90', 'TTR avg', 'Riesgo'].map(h => (
                     <th key={h} style={{ padding: '8px 14px', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textAlign: 'left', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                   ))}
                 </tr>

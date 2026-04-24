@@ -3,7 +3,7 @@ import Link from 'next/link'
 
 export const dynamic = 'force-dynamic'
 
-// Bucket B = problem categories
+// Tipificación de incidencias = problem categories
 const PROBLEM_CATEGORIES = new Set([
   'problema_unidad','problema_horario','problema_entrada','problema_salida',
   'problema_trafico','problema_manifestacion','robo_incidencia',
@@ -383,9 +383,9 @@ export default async function AnalyticsPage({
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                       <span style={{ fontSize: 12, color: '#6b7280' }}>{r.total_messages} msgs</span>
-                      <span style={{ fontSize: 12, color: '#10b981' }}>A={r.bucket_a_count}</span>
-                      <span style={{ fontSize: 12, color: '#ef4444' }}>B={r.bucket_b_count}</span>
-                      <span style={{ fontSize: 12, color: '#6b7280' }}>C={r.bucket_c_count}</span>
+                      <span style={{ fontSize: 12, color: '#10b981' }}>Operativos: {r.bucket_a_count}</span>
+                      <span style={{ fontSize: 12, color: '#ef4444' }}>Incidencias: {r.bucket_b_count}</span>
+                      <span style={{ fontSize: 12, color: '#6b7280' }}>Ruido: {r.bucket_c_count}</span>
                       {ratioBPct !== null && (
                         <span style={{ fontSize: 12, color: ratioBPct > 25 ? '#ef4444' : '#6b7280' }}>
                           ratio B={ratioBPct.toFixed(0)}%
