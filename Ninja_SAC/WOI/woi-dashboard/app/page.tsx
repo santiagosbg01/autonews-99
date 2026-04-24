@@ -74,21 +74,64 @@ export default async function HomePage() {
 
       {/* Global stats */}
       <div className="grid grid-cols-4 gap-4 mb-8">
-        {[
-          { label: 'Mensajes hoy', value: totalMsgs.toLocaleString(), color: 'var(--brand-green)' },
-          { label: 'Incidencias abiertas', value: totalOpen, color: totalOpen > 5 ? 'var(--danger)' : totalOpen > 2 ? 'var(--warning)' : 'var(--success)' },
-          { label: 'Problemas (Bucket B)', value: totalProblems, color: totalProblems > 10 ? 'var(--danger)' : 'var(--warning)' },
-          { label: 'TTFR prom (sem)', value: globalTtfr !== null ? `${globalTtfr} min` : '—', color: globalTtfr !== null && globalTtfr > 30 ? 'var(--danger)' : 'var(--success)' },
-        ].map(stat => (
-          <div key={stat.label} className="stat-card">
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
-              {stat.label}
-            </div>
-            <div style={{ fontSize: 28, fontWeight: 700, color: stat.color }}>
-              {stat.value}
-            </div>
-          </div>
-        ))}
+        {([
+          {
+            label: 'Mensajes hoy',
+            sub: 'Total recibidos hoy',
+            value: totalMsgs.toLocaleString(),
+            color: 'var(--brand-green)',
+            href: null,
+          },
+          {
+            label: 'Tickets abiertos',
+            sub: 'Hilos de problema activos',
+            value: totalOpen,
+            color: totalOpen > 5 ? 'var(--danger)' : totalOpen > 2 ? 'var(--warning)' : 'var(--success)',
+            href: '/tickets?status=abierto',
+          },
+          {
+            label: 'Mensajes problema',
+            sub: 'Mensajes individuales Bucket B',
+            value: totalProblems,
+            color: totalProblems > 10 ? 'var(--danger)' : 'var(--warning)',
+            href: '/tickets',
+          },
+          {
+            label: 'TTFR prom (sem)',
+            sub: 'Tiempo 1ra respuesta',
+            value: globalTtfr !== null ? `${globalTtfr} min` : '—',
+            color: globalTtfr !== null && globalTtfr > 30 ? 'var(--danger)' : 'var(--success)',
+            href: '/analytics',
+          },
+        ] as const).map(stat => {
+          const inner = (
+            <>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+                {stat.label}
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 700, color: stat.color, marginBottom: 4 }}>
+                {stat.value}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{stat.sub}</div>
+              {stat.href && (
+                <div style={{ fontSize: 11, color: 'var(--brand-green)', marginTop: 6, fontWeight: 600 }}>
+                  Ver →
+                </div>
+              )}
+            </>
+          )
+          return stat.href ? (
+            <Link key={stat.label} href={stat.href} style={{ textDecoration: 'none', color: 'inherit' }}>
+              <div className="stat-card" style={{ cursor: 'pointer', transition: 'box-shadow 0.15s', borderColor: 'var(--border)' }}
+                onMouseOver={(e) => (e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.08)')}
+                onMouseOut={(e)  => (e.currentTarget.style.boxShadow = '')}>
+                {inner}
+              </div>
+            </Link>
+          ) : (
+            <div key={stat.label} className="stat-card">{inner}</div>
+          )
+        })}
       </div>
 
       {/* Groups table */}
