@@ -251,6 +251,147 @@ def classify_message(
 
 
 # ---------------------------------------------------------------------------
+# Incident summary (Sonnet)
+# ---------------------------------------------------------------------------
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APIError)),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def generate_incident_summary(
+    messages: list[dict[str, Any]],
+    category: str | None,
+    urgency: str | None,
+    ttfr_seconds: int | None,
+    ttr_seconds: int | None,
+    is_closed: bool,
+) -> str:
+    """Genera un resumen breve (2-3 oraciones) de un hilo de incidente con Sonnet."""
+    system_prompt = _read_prompt("incident_summary.md")
+
+    lines = []
+    for m in messages:
+        role = m.get("sender_role") or "otro"
+        name = m.get("sender_display_name") or m.get("sender_phone", "")
+        content = (m.get("content") or f"[{m.get('media_type') or 'media'}]")[:200]
+        ts = str(m.get("timestamp", ""))[:16]
+        lines.append(f"[{ts}] [{role}] {name}: {content}")
+
+    meta = (
+        f"Categoría: {category or 'desconocida'}\n"
+        f"Urgencia: {urgency or 'baja'}\n"
+        f"TTFR: {round(ttfr_seconds / 60, 1)} min\n" if ttfr_seconds else ""
+        f"TTR: {round(ttr_seconds / 60, 1)} min\n" if ttr_seconds else ""
+        f"Estado: {'cerrada' if is_closed else 'abierta (timeout)'}\n"
+    )
+
+    user_content = (
+        f"Metadatos del incidente:\n{meta}\n"
+        f"Mensajes del hilo ({len(messages)} total):\n"
+        + "\n".join(lines)
+        + "\n\nGenera el resumen ahora."
+    )
+
+    response = get_client().messages.create(
+        model=CONFIG.anthropic.sonnet_model,
+        max_tokens=200,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    return "".join(
+        getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+    ).strip()
+
+
+# ---------------------------------------------------------------------------
+# Group analysis (Sonnet) — hourly snapshot
+# ---------------------------------------------------------------------------
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APIError)),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def generate_group_analysis(
+    group_name: str,
+    country: str,
+    vertical: str | None,
+    timezone: str,
+    messages: list[dict[str, Any]],
+    window_hours: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Genera un análisis Sonnet del grupo para la ventana dada.
+    Retorna (parsed_result_dict, usage_dict).
+    """
+    system_prompt = _read_prompt("group_analysis.md")
+
+    lines = []
+    category_counts: dict[str, int] = {}
+    for m in messages:
+        role = m.get("sender_role") or "otro"
+        name = m.get("sender_display_name") or m.get("sender_phone", "???")
+        ts = str(m.get("timestamp", ""))[:16]
+        content = (m.get("content") or f"[{m.get('media_type') or 'media'}]")[:300]
+        cat = m.get("category")
+        sent = m.get("sentiment")
+        urg = m.get("urgency")
+
+        meta = ""
+        if cat:
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+            meta = f" [cat:{cat}"
+            if sent is not None:
+                meta += f" sent:{float(sent):+.2f}"
+            if urg and urg != "baja":
+                meta += f" urg:{urg}"
+            meta += "]"
+
+        lines.append(f"[{ts}] [{role}] {name}{meta}: {content}")
+
+    ctx = "\n".join(lines) if lines else "(Sin mensajes en este período)"
+
+    user_content = (
+        f"Grupo: {group_name}\n"
+        f"Vertical: {vertical or 'desconocido'}\n"
+        f"País: {country}\n"
+        f"Zona horaria: {timezone}\n"
+        f"Ventana de análisis: últimas {window_hours}h\n"
+        f"Total mensajes: {len(messages)}\n\n"
+        f"--- MENSAJES ---\n{ctx}\n\n"
+        f"Genera el análisis JSON ahora."
+    )
+
+    response = get_client().messages.create(
+        model=CONFIG.anthropic.sonnet_model,
+        max_tokens=4096,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    text = "".join(
+        getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+    ).strip()
+
+    try:
+        result = _extract_json(text)
+    except ValueError:
+        log.warning("group_analysis_json_failed", text_len=len(text), last_100=text[-100:])
+        result = {"narrative": text, "key_topics": [], "anomalies": [], "recommendations": [],
+                  "participants": [], "dynamics": "", "client_sentiment_label": "neutro",
+                  "risk_level": "bajo", "risk_reason": None}
+
+    result["_category_counts"] = category_counts
+
+    usage = {
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+    }
+    return result, usage
+
+
+# ---------------------------------------------------------------------------
 # Daily summary (Sonnet)
 # ---------------------------------------------------------------------------
 @retry(

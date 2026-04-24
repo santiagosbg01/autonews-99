@@ -35,22 +35,24 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
         before=msg.timestamp,
         n=CONFIG.analyzer.context_messages,
     )
+    content = msg.content or (f"[{msg.media_type}]" if msg.media_type else "[media]")
     try:
         result, raw, usage = classify_message(
             group_name=msg.group_name,
-            country="MX",  # TODO: derivar de groups.country
+            country=msg.group_country or "MX",
             timezone=msg.group_timezone,
             sender_role=msg.sender_role or "otro",
             sender_phone=msg.sender_phone,
             timestamp=msg.timestamp.isoformat(),
             context_messages=context,
-            message_content=msg.content or "",
-            use_sonnet=False,
+            message_content=content,
+            use_sonnet=True,
         )
     except Exception as e:
-        log.error("haiku_classify_failed", msg_id=msg.id, error=str(e))
+        log.error("classify_failed", msg_id=msg.id, error=str(e))
         return False, None
 
+    model_used = CONFIG.anthropic.sonnet_model
     upsert_analysis(
         message_id=msg.id,
         category=result.category,
@@ -59,7 +61,7 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
         urgency=result.urgency,
         is_incident_open=result.is_incident_open,
         is_incident_close=result.is_incident_close,
-        claude_model=CONFIG.anthropic.haiku_model,
+        claude_model=model_used,
         claude_usage=usage,
         claude_raw=raw,
         reasoning=result.reasoning,
@@ -74,16 +76,17 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
 
 def _sample_with_sonnet(msg: MessageRow, haiku_payload: dict) -> bool:
     """Clasifica con Sonnet para crear una ground_truth_sample."""
+    content = msg.content or (f"[{msg.media_type}]" if msg.media_type else "[media]")
     try:
         result, _raw, _usage = classify_message(
             group_name=msg.group_name,
-            country="MX",
+            country=msg.group_country or "MX",
             timezone=msg.group_timezone,
             sender_role=msg.sender_role or "otro",
             sender_phone=msg.sender_phone,
             timestamp=msg.timestamp.isoformat(),
             context_messages=haiku_payload["context"],
-            message_content=msg.content or "",
+            message_content=content,
             use_sonnet=True,
         )
     except Exception as e:
@@ -105,11 +108,12 @@ def _sample_with_sonnet(msg: MessageRow, haiku_payload: dict) -> bool:
     return True
 
 
-def run_classification_batch(limit: int | None = None) -> BatchResult:
+def run_classification_batch(limit: int | None = None, group_name: str | None = None) -> BatchResult:
     """
     Clasifica todos los mensajes unanalyzed. Muestrea N aleatorios para Sonnet ground-truth.
+    Opcionalmente filtra por nombre de grupo (parcial, case-insensitive).
     """
-    messages = fetch_unanalyzed_messages(limit=limit)
+    messages = fetch_unanalyzed_messages(limit=limit, group_name=group_name)
     if not messages:
         log.info("no_unanalyzed_messages")
         return BatchResult(processed=0, failed=0, ground_truth_sampled=0)

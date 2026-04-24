@@ -37,21 +37,32 @@ export async function upsertGroup({ whatsappId, name }) {
 }
 
 /**
- * Upsert de participant. Si es primera vez que vemos el teléfono en el grupo,
- * se crea con role='otro' y confirmed_by_santi=false para que Santi lo revise.
+ * Upsert de participant. Auto-asigna role='agente_99' si el número está en known_agents.
+ * Para números desconocidos, crea con role='otro' y deja confirmed_by_santi=false.
  */
 export async function upsertParticipant({ groupId, phone, displayName }) {
+  // Buscar en known_agents por sufijo de 10 dígitos
+  const suffix = phone.slice(-10);
+  const { data: knownAgent } = await supabase
+    .from('known_agents')
+    .select('display_name')
+    .eq('phone_suffix', suffix)
+    .eq('is_active', true)
+    .maybeSingle();
+
+  const upsertData = {
+    group_id:     groupId,
+    phone,
+    last_seen_at: new Date().toISOString(),
+    ...(knownAgent
+      ? { role: 'agente_99', display_name: knownAgent.display_name, confirmed_by_santi: true }
+      : { display_name: displayName ?? null }
+    )
+  };
+
   const { data, error } = await supabase
     .from('participants')
-    .upsert(
-      {
-        group_id: groupId,
-        phone,
-        display_name: displayName ?? null,
-        last_seen_at: new Date().toISOString()
-      },
-      { onConflict: 'group_id,phone', ignoreDuplicates: false }
-    )
+    .upsert(upsertData, { onConflict: 'group_id,phone', ignoreDuplicates: false })
     .select('id, role')
     .single();
 
@@ -59,6 +70,11 @@ export async function upsertParticipant({ groupId, phone, displayName }) {
     logger.error({ err: error, groupId, phone }, 'Failed to upsert participant');
     throw error;
   }
+
+  if (knownAgent) {
+    logger.debug({ phone, name: knownAgent.display_name }, 'Auto-assigned agente_99');
+  }
+
   return data;
 }
 
@@ -100,6 +116,17 @@ export async function downloadFile(filePath) {
     .download(filePath);
   if (error) throw error;
   return data;
+}
+
+/**
+ * Actualiza media_url en un mensaje ya insertado.
+ */
+export async function updateMessageMediaUrl(messageId, mediaUrl) {
+  const { error } = await supabase
+    .from('messages')
+    .update({ media_url: mediaUrl })
+    .eq('id', messageId);
+  if (error) logger.warn({ err: error, messageId }, 'Failed to update media_url');
 }
 
 export async function listFiles(prefix = '') {

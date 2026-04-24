@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f5f7f5;
+  --surface: #ffffff;
+  --surface-2: #f0f4ef;
+  --surface-3: #e6ede4;
+  --border: #dde8da;
+  --border-2: #c8d9c4;
+  --text: #1a2e18;
+  --text-muted: #7a9474;
+  --text-sub: #4a6645;
+
+  /* 99minutos brand — green primary, blue secondary */
+  --brand-green: #5a9e2f;
+  --brand-green-hover: #4a8a22;
+  --brand-green-dim: #5a9e2f18;
+  --brand-blue: #4d65ff;
+  --brand-blue-hover: #3a52e8;
+  --brand-blue-dim: #4d65ff15;
+
+  /* Semantic */
+  --success: #5a9e2f;
+  --success-dim: #5a9e2f18;
+  --warning: #d97706;
+  --warning-dim: #d9770618;
+  --danger: #dc2626;
+  --danger-dim: #dc262618;
+  --info: #4d65ff;
+  --info-dim: #4d65ff18;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--background);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  transition: border-color 0.2s;
+}
+.stat-card:hover { border-color: var(--border-2); }
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.badge-a {
+  background: var(--success-dim);
+  color: var(--brand-green);
+  border: 1px solid #85C44040;
+}
+.badge-b {
+  background: var(--warning-dim);
+  color: #fbbf24;
+  border: 1px solid #f59e0b40;
+}
+.badge-c {
+  background: var(--info-dim);
+  color: #818cf8;
+  border: 1px solid #4d65ff40;
+}
+.badge-alta {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid #ff4d6a40;
+}
+.badge-media {
+  background: var(--warning-dim);
+  color: var(--warning);
+  border: 1px solid #f59e0b40;
+}
+.badge-baja {
+  background: var(--success-dim);
+  color: var(--success);
+  border: 1px solid #85C44040;
+}
+
+/* Buttons */
+.btn-primary {
+  background: var(--brand-green);
+  color: white;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+  font-family: 'Inter', sans-serif;
+}
+.btn-primary:hover { background: var(--brand-green-hover); }
+.btn-primary:active { transform: scale(0.98); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-sub);
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: 'Inter', sans-serif;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--brand-green);
+  background: var(--brand-green-dim);
+}
+
+/* Table rows */
+.group-row { transition: background 0.1s; }
+.group-row:hover { background: var(--surface-2); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}

@@ -1,6 +1,7 @@
 import { logger } from './logger.js';
-import { upsertGroup, upsertParticipant, insertMessage } from './supabase.js';
+import { upsertGroup, upsertParticipant, insertMessage, updateMessageMediaUrl } from './supabase.js';
 import { markHealthy } from './healthcheck.js';
+import { downloadAndStoreMedia } from './media-downloader.js';
 
 /**
  * Extrae tipo de media y contenido legible desde un message de Baileys.
@@ -79,14 +80,18 @@ function jidToPhone(jid) {
  * Cada evento puede traer varios mensajes en m.messages.
  */
 export async function handleIncomingMessages(m, sock) {
-  if (m.type !== 'notify') return;
+  // 'notify' = mensaje nuevo en tiempo real
+  // 'append' = mensajes sincronizados desde historial al reconectar
+  if (m.type !== 'notify' && m.type !== 'append') return;
+
+  const isHistory = m.type === 'append';
 
   for (const msg of m.messages) {
     try {
-      markHealthy();
+      if (m.type === 'notify') markHealthy();
 
       if (!msg.key || !msg.message) continue;
-      if (msg.key.fromMe) continue;                // Nunca procesar mensajes que enviamos
+      if (msg.key.fromMe) continue;
       if (!msg.key.remoteJid?.endsWith('@g.us')) continue;   // Solo grupos
 
       const groupJid = msg.key.remoteJid;
@@ -143,10 +148,20 @@ export async function handleIncomingMessages(m, sock) {
             senderPhone,
             hasContent: Boolean(content),
             mediaType,
+            isHistory,
             contentPreview: content?.slice(0, 80) ?? null
           },
-          'Message ingested'
+          isHistory ? 'Historical message ingested' : 'Message ingested'
         );
+
+        // Download & store media for images and documents (non-blocking)
+        if (mediaType === 'image' || mediaType === 'document') {
+          downloadAndStoreMedia(msg, sock, group.id, inserted.id)
+            .then((mediaUrl) => {
+              if (mediaUrl) updateMessageMediaUrl(inserted.id, mediaUrl);
+            })
+            .catch((err) => logger.warn({ err, msgId: inserted.id }, 'Media pipeline error'));
+        }
       }
     } catch (err) {
       logger.error({ err, msgId: msg?.key?.id }, 'Failed to handle message');

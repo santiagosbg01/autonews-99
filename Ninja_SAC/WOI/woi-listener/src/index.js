@@ -12,6 +12,8 @@ import { logger } from './logger.js';
 import { handleIncomingMessages, handleGroupParticipantsUpdate } from './message-handler.js';
 import { backupAuthState, restoreLatestAuthState, startBackupInterval } from './auth-backup.js';
 import { startHealthcheckLoop, markHealthy } from './healthcheck.js';
+import { upsertGroup } from './supabase.js';
+import { ensureMediaBucket } from './media-downloader.js';
 
 let currentSock = null;
 let backupHandle = null;
@@ -45,21 +47,23 @@ async function ensureAuthState() {
 
 async function start() {
   await ensureAuthState();
+  await ensureMediaBucket();
 
   const { state, saveCreds } = await useMultiFileAuthState(config.listener.authStateDir);
   const { version, isLatest } = await fetchLatestBaileysVersion();
   logger.info({ version, isLatest }, 'Using Baileys version');
+
+  const baileysLogger = logger.child({ module: 'baileys' });
+  baileysLogger.level = config.logging.level === 'debug' ? 'debug' : 'silent';
 
   const sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
     browser: Browsers.macOS('Desktop'),
-    syncFullHistory: false,
+    syncFullHistory: true,
     markOnlineOnConnect: false,
-    logger: logger.child({ module: 'baileys' }).level === 'debug'
-      ? logger.child({ module: 'baileys' })
-      : undefined
+    logger: baileysLogger
   });
 
   currentSock = sock;
@@ -87,6 +91,23 @@ async function start() {
       await backupAuthState().catch((err) =>
         logger.error({ err }, 'Initial auth_state backup failed')
       );
+
+      // Scan y registrar todos los grupos donde está el bot
+      setTimeout(async () => {
+        try {
+          const participating = await sock.groupFetchAllParticipating();
+          const groups = Object.values(participating);
+          logger.info({ count: groups.length }, 'Scanning joined groups');
+          for (const g of groups) {
+            await upsertGroup({ whatsappId: g.id, name: g.subject }).catch((err) =>
+              logger.warn({ err, groupId: g.id }, 'Failed to upsert group during scan')
+            );
+          }
+          logger.info({ count: groups.length }, 'Group scan complete');
+        } catch (err) {
+          logger.warn({ err }, 'Group scan failed');
+        }
+      }, 3000);
     }
 
     if (connection === 'close') {

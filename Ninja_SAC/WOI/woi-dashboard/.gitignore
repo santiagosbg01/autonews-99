@@ -1,0 +1,22 @@
+# Override parent .gitignore — lib/ is needed for Next.js
+!lib/
+!lib/**
+
+# Next.js
+/.next/
+/out/
+/build
+
+# Dependencies
+/node_modules
+
+# Env
+.env*
+!.env.example
+
+# Misc
+.DS_Store
+*.pem
+npm-debug.log*
+next-env.d.ts
+*.tsbuildinfo

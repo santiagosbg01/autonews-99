@@ -9,9 +9,10 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 const required = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
-  'SUPABASE_STORAGE_BUCKET',
-  'SLACK_HEALTHCHECK_WEBHOOK'
+  'SUPABASE_STORAGE_BUCKET'
 ];
+
+const optional = ['SLACK_HEALTHCHECK_WEBHOOK'];
 
 const missing = required.filter((k) => !process.env[k]);
 if (missing.length > 0) {
@@ -20,6 +21,11 @@ if (missing.length > 0) {
     `Copia .env.example a .env y llena los valores.`
   );
   process.exit(1);
+}
+
+const missingOptional = optional.filter((k) => !process.env[k]);
+if (missingOptional.length > 0) {
+  console.warn(`[config] Optional env vars not set: ${missingOptional.join(', ')}`);
 }
 
 export const config = {

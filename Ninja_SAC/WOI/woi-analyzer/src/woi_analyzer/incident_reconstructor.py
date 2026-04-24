@@ -17,10 +17,50 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-from woi_analyzer.db import connect
+from datetime import timezone as _tz
+
+from woi_analyzer.claude_client import generate_incident_summary
+from woi_analyzer.db import connect, fetch_incident_messages, update_incident_summary
 from woi_analyzer.logging_setup import log
+from woi_analyzer.slack import alert_incident_opened
 
 INCIDENT_TIMEOUT_HOURS = 72
+
+# SLA thresholds for auto-escalation
+ESCALATE_ALTA_MIN  = 45    # auto-escalate alta urgency if no ACK in 45 min
+ESCALATE_MEDIA_MIN = 120   # auto-escalate media urgency if no ACK in 2 hours
+PENDING_HOURS      = 4     # responded but still open after 4h → pendiente
+
+
+def _derive_status(
+    closed_at: datetime | None,
+    first_response_at: datetime | None,
+    urgency: str | None,
+    opened_at: datetime,
+    now: datetime,
+) -> tuple[str, str | None]:
+    """
+    Calcula (status, escalated_reason) para un incident candidate.
+    Status: abierto | respondido | resuelto | escalado | pendiente
+    """
+    if closed_at is not None:
+        return "resuelto", None
+
+    open_minutes = (now - opened_at).total_seconds() / 60
+
+    if first_response_at is None:
+        # Sin respuesta
+        if urgency == "alta" and open_minutes >= ESCALATE_ALTA_MIN:
+            return "escalado", "sin_respuesta_alta_urgencia"
+        if urgency == "media" and open_minutes >= ESCALATE_MEDIA_MIN:
+            return "escalado", "sin_respuesta_media_urgencia"
+        return "abierto", None
+
+    # Con respuesta pero aún abierto
+    open_hours = open_minutes / 60
+    if open_hours >= PENDING_HOURS:
+        return "pendiente", None
+    return "respondido", None
 
 
 @dataclass
@@ -86,8 +126,8 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
             stale = open_incidents.pop(o)
             finalized.append(stale)
 
-        # Apertura: solo clientes pueden abrir
-        if m["is_incident_open"] and m["sender_role"] == "cliente":
+        # Apertura: cualquier no-agente puede abrir (cliente o 'otro' no mapeado)
+        if m["is_incident_open"] and m["sender_role"] != "agente_99":
             if owner in open_incidents:
                 # Cliente abre otra mientras tiene una abierta → cerrar la anterior
                 finalized.append(open_incidents.pop(owner))
@@ -152,11 +192,17 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
     """
     Inserta incidentes nuevos o actualiza si ya existe un incident_id asignado a
     alguno de los mensajes del candidato.
+    Genera summaries Sonnet para incidentes cerrados y envía alertas Slack.
     """
     if not candidates:
         return 0
 
     count = 0
+    # Track (candidate, incident_id, is_new) for post-commit processing
+    finalized: list[tuple[IncidentCandidate, int, bool]] = []
+
+    now = datetime.now().astimezone()
+
     with connect() as conn, conn.cursor() as cur:
         for c in candidates:
             ttfr = None
@@ -166,29 +212,43 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
             if c.closed_at:
                 ttr = int((c.closed_at - c.opened_at).total_seconds())
 
+            status, escalated_reason = _derive_status(
+                closed_at=c.closed_at,
+                first_response_at=c.first_response_at,
+                urgency=c.urgency,
+                opened_at=c.opened_at,
+                now=now,
+            )
+            escalated_at = now if status == "escalado" else None
+
             # Verificar si ya existe un incident asociado a los mensajes
             cur.execute(
                 "SELECT DISTINCT incident_id FROM analysis WHERE message_id = ANY(%s) AND incident_id IS NOT NULL",
                 (c.message_ids,),
             )
-            existing = [r[0] for r in cur.fetchall() if r[0] is not None]
+            existing = [r["incident_id"] for r in cur.fetchall() if r["incident_id"] is not None]
 
+            is_new = False
             if existing:
                 incident_id = existing[0]
                 cur.execute(
                     """
                     UPDATE incidents SET
-                        closed_at = %s,
-                        category = COALESCE(%s, category),
-                        urgency = COALESCE(%s, urgency),
+                        closed_at         = %s,
+                        category          = COALESCE(%s, category),
+                        urgency           = COALESCE(%s, urgency),
                         first_response_at = COALESCE(first_response_at, %s),
                         first_response_by = COALESCE(first_response_by, %s),
-                        resolution_at = %s,
-                        sentiment_end = %s,
-                        sentiment_avg = %s,
-                        message_count = %s,
-                        ttfr_seconds = COALESCE(ttfr_seconds, %s),
-                        ttr_seconds = %s
+                        resolution_at     = %s,
+                        sentiment_end     = %s,
+                        sentiment_avg     = %s,
+                        message_count     = %s,
+                        ttfr_seconds      = COALESCE(ttfr_seconds, %s),
+                        ttr_seconds       = %s,
+                        status            = %s,
+                        escalated_at      = COALESCE(escalated_at, %s),
+                        escalated_reason  = COALESCE(escalated_reason, %s),
+                        updated_at        = NOW()
                     WHERE id = %s
                     """,
                     (
@@ -196,7 +256,9 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         c.first_response_at, c.first_response_by,
                         c.closed_at,
                         c.sentiment_end, c.sentiment_avg,
-                        len(c.message_ids), ttfr, ttr, incident_id,
+                        len(c.message_ids), ttfr, ttr,
+                        status, escalated_at, escalated_reason,
+                        incident_id,
                     ),
                 )
             else:
@@ -206,8 +268,9 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         group_id, opened_at, closed_at, category, urgency,
                         first_response_at, first_response_by, resolution_at,
                         sentiment_start, sentiment_end, sentiment_avg,
-                        owner_phone, message_count, ttfr_seconds, ttr_seconds, timezone
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        owner_phone, message_count, ttfr_seconds, ttr_seconds, timezone,
+                        status, escalated_at, escalated_reason
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                     """,
                     (
@@ -215,9 +278,11 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         c.first_response_at, c.first_response_by, c.closed_at,
                         c.sentiment_start, c.sentiment_end, c.sentiment_avg,
                         c.owner_phone, len(c.message_ids), ttfr, ttr, c.timezone,
+                        status, escalated_at, escalated_reason,
                     ),
                 )
-                incident_id = cur.fetchone()[0]
+                incident_id = cur.fetchone()["id"]
+                is_new = True
 
             # Linkear todos los mensajes al incident
             cur.execute(
@@ -225,8 +290,94 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                 (incident_id, c.message_ids),
             )
             count += 1
+            finalized.append((c, incident_id, is_new))
+
         conn.commit()
+
+    # Post-commit: Slack alerts + Sonnet summaries (outside the transaction)
+    for c, incident_id, is_new in finalized:
+        # Slack alert for new alta/media incidents
+        if is_new and c.urgency in ("alta", "media"):
+            try:
+                with connect() as conn2, conn2.cursor() as cur2:
+                    cur2.execute("SELECT name FROM groups WHERE id = %s", (c.group_id,))
+                    row = cur2.fetchone()
+                    group_name = row["name"] if row else f"grupo#{c.group_id}"
+                alert_incident_opened(
+                    group_name=group_name,
+                    category=c.category or "desconocida",
+                    urgency=c.urgency or "baja",
+                    owner_phone=c.owner_phone or "???",
+                    incident_id=incident_id,
+                )
+            except Exception as e:
+                log.warning("slack_alert_failed", incident_id=incident_id, error=str(e))
+
+        # Sonnet summary for closed/timed-out incidents
+        if c.closed_at is not None or len(c.message_ids) >= 3:
+            try:
+                msgs = fetch_incident_messages(c.message_ids)
+                if msgs:
+                    ttfr_sec = int((c.first_response_at - c.opened_at).total_seconds()) if c.first_response_at else None
+                    ttr_sec = int((c.closed_at - c.opened_at).total_seconds()) if c.closed_at else None
+                    summary = generate_incident_summary(
+                        messages=msgs,
+                        category=c.category,
+                        urgency=c.urgency,
+                        ttfr_seconds=ttfr_sec,
+                        ttr_seconds=ttr_sec,
+                        is_closed=c.closed_at is not None,
+                    )
+                    update_incident_summary(incident_id, summary)
+                    log.info("incident_summary_generated", incident_id=incident_id)
+            except Exception as e:
+                log.warning("incident_summary_failed", incident_id=incident_id, error=str(e))
+
     return count
+
+
+def refresh_open_ticket_statuses() -> int:
+    """
+    Recorre todos los tickets abiertos/respondidos y recalcula su status.
+    Convierte 'abierto' → 'escalado' cuando supera el SLA, y 'respondido' → 'pendiente' si lleva > 4h.
+    Se llama desde el scheduler cada hora para mantener los estados frescos.
+    """
+    now = datetime.now().astimezone()
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, opened_at, first_response_at, closed_at, urgency, status, escalated_at
+            FROM incidents
+            WHERE closed_at IS NULL
+            ORDER BY opened_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        updated = 0
+        for row in rows:
+            new_status, esc_reason = _derive_status(
+                closed_at=row["closed_at"],
+                first_response_at=row["first_response_at"],
+                urgency=row["urgency"],
+                opened_at=row["opened_at"],
+                now=now,
+            )
+            if new_status != row["status"]:
+                esc_at = now if new_status == "escalado" and row["escalated_at"] is None else row["escalated_at"]
+                cur.execute(
+                    """
+                    UPDATE incidents
+                    SET status = %s, escalated_at = COALESCE(escalated_at, %s),
+                        escalated_reason = COALESCE(escalated_reason, %s), updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (new_status, esc_at, esc_reason, row["id"]),
+                )
+                updated += 1
+        conn.commit()
+    if updated:
+        log.info("ticket_statuses_refreshed", updated=updated)
+    return updated
 
 
 def reconstruct_recent_incidents(lookback_hours: int = 96) -> int:
@@ -238,7 +389,7 @@ def reconstruct_recent_incidents(lookback_hours: int = 96) -> int:
 
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM groups WHERE is_active = TRUE")
-        group_ids = [r[0] for r in cur.fetchall()]
+        group_ids = [r["id"] for r in cur.fetchall()]
 
     total = 0
     for gid in group_ids:
