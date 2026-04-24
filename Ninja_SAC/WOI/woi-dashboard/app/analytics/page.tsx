@@ -1,7 +1,34 @@
-import { getAgentLeaderboard, getOpenIncidents, getDailyReports } from '@/lib/queries'
+import { getAgentLeaderboard, getOpenIncidents, getDailyReports, getIncidentCategoryBreakdown, CATEGORY_ES } from '@/lib/queries'
 import Link from 'next/link'
 
 export const dynamic = 'force-dynamic'
+
+// Bucket B = problem categories
+const PROBLEM_CATEGORIES = new Set([
+  'problema_unidad','problema_horario','problema_entrada','problema_salida',
+  'problema_trafico','problema_manifestacion','robo_incidencia',
+  'problema_sistema','problema_proveedor',
+])
+
+const BUCKET_COLORS: Record<string, string> = {
+  problema_unidad:        '#ef4444',
+  problema_horario:       '#f97316',
+  problema_entrada:       '#f59e0b',
+  problema_salida:        '#eab308',
+  problema_trafico:       '#84cc16',
+  problema_manifestacion: '#06b6d4',
+  robo_incidencia:        '#8b5cf6',
+  problema_sistema:       '#ec4899',
+  problema_proveedor:     '#6366f1',
+  confirmacion_resolucion:'#10b981',
+  reporte_entrega:        '#10b981',
+  confirmacion_llegada:   '#22c55e',
+  confirmacion_salida:    '#22c55e',
+  acuse_recibo:           '#94a3b8',
+  consulta_info:          '#64748b',
+  saludo_ruido:           '#cbd5e1',
+  otro:                   '#e2e8f0',
+}
 
 const URGENCY_COLOR: Record<string, string> = {
   alta: '#ef4444',
@@ -61,12 +88,25 @@ function TtfrColor({ minutes }: { minutes: number | null }) {
   )
 }
 
-export default async function AnalyticsPage() {
-  const [agents, openIncidents, dailyReports] = await Promise.all([
+export default async function AnalyticsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string>>
+}) {
+  const sp   = await searchParams
+  const days = parseInt(sp.days ?? '30', 10) || 30
+
+  const [agents, openIncidents, dailyReports, categoryBreakdown] = await Promise.all([
     getAgentLeaderboard(),
     getOpenIncidents(),
     getDailyReports(14),
+    getIncidentCategoryBreakdown(days),
   ])
+
+  const problems   = categoryBreakdown.filter(c => PROBLEM_CATEGORIES.has(c.category))
+  const operations = categoryBreakdown.filter(c => !PROBLEM_CATEGORIES.has(c.category))
+  const totalProblems = problems.reduce((s, c) => s + c.count, 0)
+  const totalAll      = categoryBreakdown.reduce((s, c) => s + c.count, 0)
 
   const totalOpen = openIncidents.length
   const altaCount = openIncidents.filter(i => i.urgency === 'alta').length
@@ -74,19 +114,36 @@ export default async function AnalyticsPage() {
     ? agents.filter(a => a.avg_ttfr_minutes !== null).reduce((s, a) => s + (a.avg_ttfr_minutes ?? 0), 0) / agents.filter(a => a.avg_ttfr_minutes !== null).length
     : null
 
+  const PERIOD_OPTS = [
+    { v: '7',   label: '7 días'  },
+    { v: '30',  label: '30 días' },
+    { v: '90',  label: '90 días' },
+    { v: '365', label: '1 año'   },
+  ]
+
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 1400, margin: '0 auto', paddingBottom: 80 }}>
+    <div style={{ paddingBottom: 80 }}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 32 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28 }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700, color: '#111827', margin: 0 }}>Analytics</h1>
           <p style={{ color: '#6b7280', fontSize: 14, marginTop: 4 }}>
-            Leaderboard de agentes · Incidencias abiertas · Reportes diarios
+            Tipos de problema · Leaderboard · Incidencias · Reportes diarios
           </p>
         </div>
-        <Link href="/" style={{ color: '#5a9e2f', fontSize: 14, textDecoration: 'none' }}>
-          ← Grupos
-        </Link>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {PERIOD_OPTS.map(o => (
+            <Link key={o.v} href={`/analytics?days=${o.v}`} style={{
+              padding: '6px 14px', borderRadius: 8, fontSize: 13, fontWeight: 600,
+              textDecoration: 'none',
+              background: String(days) === o.v ? '#16a34a' : '#f1f5f9',
+              color:      String(days) === o.v ? '#fff'    : '#475569',
+              border:     `1px solid ${String(days) === o.v ? '#16a34a' : '#e2e8f0'}`,
+            }}>
+              {o.label}
+            </Link>
+          ))}
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -101,6 +158,111 @@ export default async function AnalyticsPage() {
             <div style={{ fontSize: 28, fontWeight: 700, color: c.color }}>{c.value}</div>
           </div>
         ))}
+      </div>
+
+      {/* ── Tipos de problema ── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden', marginBottom: 32 }}>
+        <div style={{ padding: '16px 24px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>Tipos de problema</h2>
+            <p style={{ fontSize: 12, color: '#64748b', margin: '2px 0 0' }}>
+              {totalProblems} incidencias de problema en los últimos {days} días · {totalAll} total incluyendo operativas
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
+          {/* Problems column */}
+          <div style={{ borderRight: '1px solid #f1f5f9' }}>
+            <div style={{ padding: '12px 24px', background: '#fef2f2', borderBottom: '1px solid #f1f5f9' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                🚨 Problemas — {totalProblems} incidencias
+              </span>
+            </div>
+            {problems.length === 0 ? (
+              <div style={{ padding: '24px', color: '#94a3b8', fontSize: 13, textAlign: 'center' }}>Sin problemas en este período</div>
+            ) : problems.map((item, i) => {
+              const barColor = BUCKET_COLORS[item.category] ?? '#ef4444'
+              const maxCount = problems[0].count
+              return (
+                <div key={item.category} style={{
+                  padding: '14px 24px',
+                  borderBottom: i < problems.length - 1 ? '1px solid #f8fafc' : 'none',
+                  background: i % 2 === 0 ? '#fff' : '#fafafa',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                    <div>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{item.label}</span>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 3 }}>
+                        {item.urgency_alta > 0 && (
+                          <span style={{ fontSize: 10, fontWeight: 700, color: '#ef4444', background: '#fef2f2', padding: '1px 6px', borderRadius: 99 }}>
+                            {item.urgency_alta} alta
+                          </span>
+                        )}
+                        {item.urgency_media > 0 && (
+                          <span style={{ fontSize: 10, fontWeight: 600, color: '#f59e0b', background: '#fffbeb', padding: '1px 6px', borderRadius: 99 }}>
+                            {item.urgency_media} media
+                          </span>
+                        )}
+                        {item.avg_ttfr_min != null && (
+                          <span style={{ fontSize: 10, color: '#64748b' }}>TTFR {item.avg_ttfr_min}m</span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0, marginLeft: 16 }}>
+                      <span style={{ fontSize: 20, fontWeight: 800, color: barColor }}>{item.count}</span>
+                      <span style={{ fontSize: 12, color: '#94a3b8', marginLeft: 4 }}>({item.pct}%)</span>
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  <div style={{ height: 6, background: '#f1f5f9', borderRadius: 99, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${(item.count / maxCount) * 100}%`,
+                      height: '100%', borderRadius: 99, background: barColor,
+                      transition: 'width 0.3s',
+                    }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Operational / other column */}
+          <div>
+            <div style={{ padding: '12px 24px', background: '#f0fdf4', borderBottom: '1px solid #f1f5f9' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#16a34a', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                ✅ Operativas — {totalAll - totalProblems} mensajes
+              </span>
+            </div>
+            {operations.length === 0 ? (
+              <div style={{ padding: '24px', color: '#94a3b8', fontSize: 13, textAlign: 'center' }}>Sin datos</div>
+            ) : operations.map((item, i) => {
+              const barColor = BUCKET_COLORS[item.category] ?? '#10b981'
+              const maxCount = operations[0].count
+              return (
+                <div key={item.category} style={{
+                  padding: '14px 24px',
+                  borderBottom: i < operations.length - 1 ? '1px solid #f8fafc' : 'none',
+                  background: i % 2 === 0 ? '#fff' : '#fafafa',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#0f172a' }}>{item.label}</span>
+                    <div style={{ textAlign: 'right', flexShrink: 0, marginLeft: 16 }}>
+                      <span style={{ fontSize: 20, fontWeight: 800, color: barColor }}>{item.count}</span>
+                      <span style={{ fontSize: 12, color: '#94a3b8', marginLeft: 4 }}>({item.pct}%)</span>
+                    </div>
+                  </div>
+                  <div style={{ height: 6, background: '#f1f5f9', borderRadius: 99, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${(item.count / maxCount) * 100}%`,
+                      height: '100%', borderRadius: 99, background: barColor,
+                    }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>

@@ -700,6 +700,62 @@ export async function getAllTicketsFiltered(opts: {
   })) as TicketRow[]
 }
 
+// ─── Incident category breakdown ─────────────────────────────────────────────
+
+export type CategoryBreakdownItem = {
+  category: string
+  label: string
+  count: number
+  pct: number
+  urgency_alta: number
+  urgency_media: number
+  urgency_baja: number
+  avg_ttfr_min: number | null
+}
+
+export async function getIncidentCategoryBreakdown(days = 30): Promise<CategoryBreakdownItem[]> {
+  const since = new Date()
+  since.setDate(since.getDate() - days)
+
+  const { data, error } = await supabaseAdmin
+    .from('incidents')
+    .select('category, urgency, ttfr_seconds')
+    .gte('opened_at', since.toISOString())
+    .not('category', 'is', null)
+
+  if (error || !data) return []
+
+  const map: Record<string, { count: number; alta: number; media: number; baja: number; ttfrs: number[] }> = {}
+
+  for (const row of data as any[]) {
+    const cat = row.category as string
+    if (!map[cat]) map[cat] = { count: 0, alta: 0, media: 0, baja: 0, ttfrs: [] }
+    map[cat].count++
+    if (row.urgency === 'alta')  map[cat].alta++
+    if (row.urgency === 'media') map[cat].media++
+    if (row.urgency === 'baja')  map[cat].baja++
+    if (row.ttfr_seconds != null) map[cat].ttfrs.push(row.ttfr_seconds)
+  }
+
+  const total = Object.values(map).reduce((s, v) => s + v.count, 0)
+  if (total === 0) return []
+
+  return Object.entries(map)
+    .map(([cat, v]) => ({
+      category:      cat,
+      label:         CATEGORY_ES[cat] ?? cat.replace(/_/g, ' '),
+      count:         v.count,
+      pct:           Math.round((v.count / total) * 1000) / 10,
+      urgency_alta:  v.alta,
+      urgency_media: v.media,
+      urgency_baja:  v.baja,
+      avg_ttfr_min:  v.ttfrs.length > 0
+        ? Math.round(v.ttfrs.reduce((a, b) => a + b, 0) / v.ttfrs.length / 60)
+        : null,
+    }))
+    .sort((a, b) => b.count - a.count)
+}
+
 // ─── Date range helpers ───────────────────────────────────────────────────────
 
 export type RangeKey = 'hoy' | 'semana' | 'mes' | 'todos' | 'custom'
