@@ -868,3 +868,170 @@ export async function getGroupHealthTrend(groupId: number, days = 14): Promise<G
   if (error) return []
   return data ?? []
 }
+
+// ── Analytics time-series & scorecard ─────────────────────────────────────────
+
+export type TimeSeriesPoint = {
+  date: string            // YYYY-MM-DD
+  messages: number
+  incidents: number
+  sentiment: number | null  // 0-10 scale
+  ttfr_minutes: number | null
+  resolution_rate: number | null  // 0-100
+}
+
+export type GroupScorecard = {
+  id: number
+  name: string
+  client_name: string | null
+  country: string | null
+  vertical: string | null
+  total_messages: number
+  open_incidents: number
+  avg_sentiment: number | null   // 0-10
+  avg_ttfr_minutes: number | null
+  resolution_rate: number | null // 0-100
+  sla_pct: number | null         // % responded within 15 min
+  risk: 'high' | 'medium' | 'low'
+}
+
+export async function getAnalyticsTimeSeries(
+  from: string | null,
+  to: string | null,
+  groupId: number | null,
+): Promise<TimeSeriesPoint[]> {
+  // Use daily_reports for global data, or group_kpi_snapshots for per-group
+  if (groupId) {
+    const q = supabaseAdmin
+      .from('group_kpi_snapshots')
+      .select('snapshot_date, total_messages, bucket_b, incidents_opened, incidents_closed, client_sentiment_avg, avg_ttfr_seconds, avg_ttr_seconds')
+      .eq('group_id', groupId)
+      .order('snapshot_date', { ascending: true })
+    if (from) (q as any).gte('snapshot_date', from)
+    if (to)   (q as any).lte('snapshot_date', to)
+    const { data } = await q
+    return (data ?? []).map((r: any) => ({
+      date: r.snapshot_date,
+      messages: r.total_messages ?? 0,
+      incidents: r.incidents_opened ?? 0,
+      sentiment: r.client_sentiment_avg != null
+        ? Math.round(((Number(r.client_sentiment_avg) + 1) / 2) * 100) / 10
+        : null,
+      ttfr_minutes: r.avg_ttfr_seconds != null ? Math.round(r.avg_ttfr_seconds / 60) : null,
+      resolution_rate: (r.incidents_opened > 0 && r.incidents_closed != null)
+        ? Math.round((r.incidents_closed / r.incidents_opened) * 100)
+        : null,
+    }))
+  }
+
+  // Global: from daily_reports
+  let q = supabaseAdmin
+    .from('daily_reports')
+    .select('report_date, total_messages, bucket_b_count, incidents_opened, incidents_closed, avg_ttfr_seconds')
+    .order('report_date', { ascending: true })
+  if (from) q = q.gte('report_date', from)
+  if (to)   q = q.lte('report_date', to)
+  const { data } = await q
+  return (data ?? []).map((r: any) => ({
+    date: r.report_date,
+    messages: r.total_messages ?? 0,
+    incidents: r.incidents_opened ?? 0,
+    sentiment: null, // daily_reports doesn't store global sentiment
+    ttfr_minutes: r.avg_ttfr_seconds != null ? Math.round(r.avg_ttfr_seconds / 60) : null,
+    resolution_rate: (r.incidents_opened > 0 && r.incidents_closed != null)
+      ? Math.round((r.incidents_closed / r.incidents_opened) * 100)
+      : null,
+  }))
+}
+
+export async function getGroupScorecard(
+  from: string | null,
+  to: string | null,
+): Promise<GroupScorecard[]> {
+  // Pull per-group KPI snapshots aggregated over the date range
+  let q = supabaseAdmin
+    .from('group_kpi_snapshots')
+    .select(`
+      group_id,
+      total_messages,
+      bucket_b,
+      incidents_opened,
+      incidents_closed,
+      client_sentiment_avg,
+      avg_ttfr_seconds,
+      snapshot_date
+    `)
+    .order('snapshot_date', { ascending: false })
+  if (from) q = q.gte('snapshot_date', from)
+  if (to)   q = q.lte('snapshot_date', to)
+  const { data: snapshots } = await q
+
+  // Also get group meta
+  const { data: groups } = await supabaseAdmin
+    .from('groups')
+    .select('id, name, client_name, country, vertical')
+    .eq('is_active', true)
+
+  const groupMap = new Map((groups ?? []).map((g: any) => [g.id, g]))
+
+  // Aggregate per group
+  const byGroup = new Map<number, any[]>()
+  for (const s of (snapshots ?? [])) {
+    if (!byGroup.has(s.group_id)) byGroup.set(s.group_id, [])
+    byGroup.get(s.group_id)!.push(s)
+  }
+
+  // Get open incidents count per group
+  const { data: openInc } = await supabaseAdmin
+    .from('incidents')
+    .select('group_id')
+    .eq('is_open', true)
+  const openByGroup = new Map<number, number>()
+  for (const inc of (openInc ?? [])) {
+    openByGroup.set(inc.group_id, (openByGroup.get(inc.group_id) ?? 0) + 1)
+  }
+
+  const result: GroupScorecard[] = []
+  for (const [gid, rows] of byGroup.entries()) {
+    const meta = groupMap.get(gid)
+    if (!meta) continue
+    const totalMsgs   = rows.reduce((s: number, r: any) => s + (r.total_messages ?? 0), 0)
+    const totalIncOpen  = rows.reduce((s: number, r: any) => s + (r.incidents_opened ?? 0), 0)
+    const totalIncClose = rows.reduce((s: number, r: any) => s + (r.incidents_closed ?? 0), 0)
+    const sentVals    = rows.map((r: any) => r.client_sentiment_avg).filter((v: any) => v != null) as number[]
+    const ttfrVals    = rows.map((r: any) => r.avg_ttfr_seconds).filter((v: any) => v != null) as number[]
+    const avgSent     = sentVals.length > 0 ? sentVals.reduce((a, b) => a + b, 0) / sentVals.length : null
+    const avgTtfr     = ttfrVals.length > 0 ? ttfrVals.reduce((a, b) => a + b, 0) / ttfrVals.length : null
+    const resoRate    = totalIncOpen > 0 ? Math.round((totalIncClose / totalIncOpen) * 100) : null
+    const sent010     = avgSent != null ? Math.round(((avgSent + 1) / 2) * 100) / 10 : null
+    const ttfrMin     = avgTtfr != null ? Math.round(avgTtfr / 60) : null
+
+    // Risk: high if sentiment < 5 OR ttfr > 30 OR resolution < 50%
+    const risk: 'high' | 'medium' | 'low' =
+      (sent010 != null && sent010 < 4) || (ttfrMin != null && ttfrMin > 30) || (resoRate != null && resoRate < 40)
+        ? 'high'
+        : (sent010 != null && sent010 < 6) || (ttfrMin != null && ttfrMin > 20)
+          ? 'medium'
+          : 'low'
+
+    result.push({
+      id: gid,
+      name: meta.name,
+      client_name: meta.client_name,
+      country: meta.country,
+      vertical: meta.vertical,
+      total_messages: totalMsgs,
+      open_incidents: openByGroup.get(gid) ?? 0,
+      avg_sentiment: sent010,
+      avg_ttfr_minutes: ttfrMin,
+      resolution_rate: resoRate,
+      sla_pct: null, // would need detailed TTFR breakdown
+      risk,
+    })
+  }
+
+  return result.sort((a, b) => {
+    const riskOrder = { high: 0, medium: 1, low: 2 }
+    return riskOrder[a.risk] - riskOrder[b.risk]
+  })
+}
