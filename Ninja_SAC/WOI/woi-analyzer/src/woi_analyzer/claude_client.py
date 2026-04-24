@@ -392,6 +392,47 @@ def generate_group_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Resolution check (Sonnet) — is this incident thread resolved?
+# ---------------------------------------------------------------------------
+def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
+    """
+    Pregunta a Sonnet si el hilo de mensajes indica que el incidente fue resuelto.
+    Retorna True si Sonnet determina que sí fue resuelto.
+    Usa el modelo más barato posible; respuesta esperada: JSON {"resolved": true/false, "reason": "..."}
+    """
+    lines = []
+    for m in messages:
+        role = m.get("sender_role") or "otro"
+        content = (m.get("content") or "[media]")[:200]
+        cat = m.get("category") or ""
+        lines.append(f"[{role}] ({cat}): {content}")
+
+    thread = "\n".join(lines)
+    prompt = (
+        f"Categoría del incidente: {category or 'desconocida'}\n\n"
+        f"Últimos mensajes del hilo:\n{thread}\n\n"
+        "Analiza si el hilo indica que el incidente fue RESUELTO (el problema fue atendido "
+        "y no hay pendientes activos). Responde SOLO con este JSON:\n"
+        '{"resolved": true|false, "reason": "explicación breve en español"}'
+    )
+
+    try:
+        response = get_client().messages.create(
+            model=CONFIG.anthropic.haiku_model,  # Haiku para mantener costo bajo
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(
+            getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+        ).strip()
+        data = _extract_json(text)
+        return bool(data.get("resolved", False))
+    except Exception as e:
+        log.warning("ask_is_resolved_failed", error=str(e))
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Daily summary (Sonnet)
 # ---------------------------------------------------------------------------
 @retry(

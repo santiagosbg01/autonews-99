@@ -19,7 +19,7 @@ from psycopg.rows import dict_row
 
 from datetime import timezone as _tz
 
-from woi_analyzer.claude_client import generate_incident_summary
+from woi_analyzer.claude_client import generate_incident_summary, ask_is_resolved
 from woi_analyzer.db import connect, fetch_incident_messages, update_incident_summary
 from woi_analyzer.logging_setup import log
 from woi_analyzer.slack import alert_incident_opened
@@ -30,6 +30,19 @@ INCIDENT_TIMEOUT_HOURS = 72
 ESCALATE_ALTA_MIN  = 45    # auto-escalate alta urgency if no ACK in 45 min
 ESCALATE_MEDIA_MIN = 120   # auto-escalate media urgency if no ACK in 2 hours
 PENDING_HOURS      = 4     # responded but still open after 4h → pendiente
+
+# Inactivity-based resolution: if no new messages after this many hours → resuelto
+INACTIVITY_RESOLVE_HOURS = 6
+
+# Categories that signal incident closure
+CLOSE_CATEGORIES = {
+    "confirmacion_resolucion",
+    "reporte_entrega",
+    "confirmacion_llegada",
+    "confirmacion_salida",
+    "confirmacion_evidencias",
+    "acuse_recibo",
+}
 
 
 def _derive_status(
@@ -178,8 +191,13 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
                 n = len(inc.message_ids)
                 inc.sentiment_avg = (prev * (n - 1) + sentiment) / n
 
-            # Cierre: confirmacion_resolucion cierra
-            if m["is_incident_close"] and m["category"] == "confirmacion_resolucion":
+            # Cierre: is_incident_close flag O categoría de resolución reconocida
+            is_close_signal = (
+                m["is_incident_close"]
+                or m["category"] in CLOSE_CATEGORIES
+            )
+            # Exigir que el cierre venga de un agente para evitar falsos positivos
+            if is_close_signal and m["sender_role"] == "agente_99":
                 inc.closed_at = ts
                 finalized.append(open_incidents.pop(most_recent_owner))
 
@@ -336,25 +354,79 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
     return count
 
 
+def _log_status_change(cur, incident_id: int, from_status: str, to_status: str, reason: str | None, source: str) -> None:
+    """Escribe entrada en ticket_status_logs."""
+    cur.execute(
+        """
+        INSERT INTO ticket_status_logs (incident_id, changed_by, from_status, to_status, reason, source)
+        VALUES (%s, 'system', %s, %s, %s, %s)
+        """,
+        (incident_id, from_status, to_status, reason, source),
+    )
+
+
 def refresh_open_ticket_statuses() -> int:
     """
-    Recorre todos los tickets abiertos/respondidos y recalcula su status.
-    Convierte 'abierto' → 'escalado' cuando supera el SLA, y 'respondido' → 'pendiente' si lleva > 4h.
-    Se llama desde el scheduler cada hora para mantener los estados frescos.
+    Recorre todos los tickets abiertos/respondidos y:
+    1. Recalcula SLA (escalado, pendiente) basado en tiempos.
+    2. Detecta resolución por inactividad: sin mensajes nuevos en INACTIVITY_RESOLVE_HOURS.
+    3. Para tickets en estado ambiguo (pendiente >8h), pregunta a Sonnet si el hilo
+       indica resolución.
+    Escribe en ticket_status_logs cada cambio con source='auto'.
     """
     now = datetime.now().astimezone()
+    inactivity_cutoff = now - timedelta(hours=INACTIVITY_RESOLVE_HOURS)
+    sonnet_cutoff     = now - timedelta(hours=8)
+
     with connect() as conn, conn.cursor() as cur:
+        # Fetch open/in-progress tickets + last message timestamp
         cur.execute(
             """
-            SELECT id, opened_at, first_response_at, closed_at, urgency, status, escalated_at
-            FROM incidents
-            WHERE closed_at IS NULL
-            ORDER BY opened_at DESC
+            SELECT
+                i.id, i.opened_at, i.first_response_at, i.closed_at,
+                i.urgency, i.status, i.escalated_at,
+                MAX(m.timestamp) AS last_msg_at
+            FROM incidents i
+            LEFT JOIN analysis a ON a.incident_id = i.id
+            LEFT JOIN messages m ON m.id = a.message_id
+            WHERE i.closed_at IS NULL
+            GROUP BY i.id
+            ORDER BY i.opened_at DESC
             """
         )
         rows = cur.fetchall()
         updated = 0
+
         for row in rows:
+            old_status   = row["status"] or "abierto"
+            last_msg_at  = row["last_msg_at"]
+            incident_id  = row["id"]
+
+            # ── 1. Inactivity resolution ─────────────────────────────────────
+            # If there was an agent response AND no messages for INACTIVITY_RESOLVE_HOURS
+            if (
+                row["first_response_at"] is not None
+                and last_msg_at is not None
+                and last_msg_at < inactivity_cutoff
+                and old_status not in ("resuelto", "escalado")
+            ):
+                cur.execute(
+                    """
+                    UPDATE incidents
+                    SET status = 'resuelto', closed_at = %s,
+                        resolution_at = %s, updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (last_msg_at, last_msg_at, incident_id),
+                )
+                _log_status_change(cur, incident_id, old_status, "resuelto",
+                                   f"Sin actividad por {INACTIVITY_RESOLVE_HOURS}h con respuesta previa", "auto")
+                updated += 1
+                log.info("ticket_resolved_inactivity", incident_id=incident_id,
+                         last_msg_at=str(last_msg_at))
+                continue
+
+            # ── 2. SLA-based status transitions ──────────────────────────────
             new_status, esc_reason = _derive_status(
                 closed_at=row["closed_at"],
                 first_response_at=row["first_response_at"],
@@ -362,7 +434,7 @@ def refresh_open_ticket_statuses() -> int:
                 opened_at=row["opened_at"],
                 now=now,
             )
-            if new_status != row["status"]:
+            if new_status != old_status:
                 esc_at = now if new_status == "escalado" and row["escalated_at"] is None else row["escalated_at"]
                 cur.execute(
                     """
@@ -371,12 +443,94 @@ def refresh_open_ticket_statuses() -> int:
                         escalated_reason = COALESCE(escalated_reason, %s), updated_at = NOW()
                     WHERE id = %s
                     """,
-                    (new_status, esc_at, esc_reason, row["id"]),
+                    (new_status, esc_at, esc_reason, incident_id),
                 )
+                _log_status_change(cur, incident_id, old_status, new_status, esc_reason, "auto")
                 updated += 1
+
         conn.commit()
+
+    # ── 3. Sonnet resolution check for ambiguous long-running tickets ─────────
+    # Runs outside the main transaction to avoid holding the connection
+    sonnet_resolved = _sonnet_resolution_pass(now, sonnet_cutoff)
+    updated += sonnet_resolved
+
     if updated:
         log.info("ticket_statuses_refreshed", updated=updated)
+    return updated
+
+
+def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
+    """
+    Para tickets en 'pendiente' abiertos hace >8h con mensajes recientes,
+    pregunta a Sonnet si el hilo indica resolución.
+    Evita llamadas excesivas procesando máx. 10 tickets por ronda.
+    """
+    updated = 0
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT i.id, i.opened_at, i.category, i.urgency
+            FROM incidents i
+            WHERE i.status IN ('pendiente', 'respondido')
+              AND i.closed_at IS NULL
+              AND i.opened_at < %s
+              AND (i.sonnet_checked_at IS NULL OR i.sonnet_checked_at < NOW() - INTERVAL '6 hours')
+            ORDER BY i.opened_at ASC
+            LIMIT 10
+            """,
+            (cutoff,),
+        )
+        tickets = cur.fetchall()
+
+    for ticket in tickets:
+        incident_id = ticket["id"]
+        try:
+            # Fetch last 10 messages of the incident
+            with connect() as conn2, conn2.cursor() as cur2:
+                cur2.execute(
+                    """
+                    SELECT m.sender_role, m.content, a.category
+                    FROM analysis a
+                    JOIN messages m ON m.id = a.message_id
+                    WHERE a.incident_id = %s AND m.content IS NOT NULL
+                    ORDER BY m.timestamp DESC
+                    LIMIT 10
+                    """,
+                    (incident_id,),
+                )
+                msgs = list(reversed(cur2.fetchall()))
+
+            if not msgs:
+                continue
+
+            is_resolved = ask_is_resolved(msgs, ticket["category"])
+
+            # Update sonnet_checked_at regardless of result
+            with connect() as conn3, conn3.cursor() as cur3:
+                cur3.execute(
+                    "UPDATE incidents SET sonnet_checked_at = NOW() WHERE id = %s",
+                    (incident_id,),
+                )
+                if is_resolved:
+                    cur3.execute(
+                        """
+                        UPDATE incidents
+                        SET status = 'resuelto', closed_at = NOW(),
+                            resolution_at = NOW(), updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (incident_id,),
+                    )
+                    _log_status_change(cur3, incident_id, ticket.get("status", "pendiente"),
+                                       "resuelto", "Sonnet determinó resolución implícita", "auto")
+                    updated += 1
+                    log.info("ticket_resolved_sonnet", incident_id=incident_id)
+                conn3.commit()
+
+        except Exception as e:
+            log.warning("sonnet_resolution_check_failed", incident_id=incident_id, error=str(e))
+
     return updated
 
 
