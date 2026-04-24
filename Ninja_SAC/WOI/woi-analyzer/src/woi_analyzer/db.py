@@ -666,6 +666,35 @@ def fetch_latest_group_analysis(group_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def reset_analyzed_flag(
+    group_name: str | None = None,
+    since: datetime | None = None,
+) -> int:
+    """
+    Marca mensajes como analyzed=FALSE para que el clasificador los re-procese.
+    Retorna el número de filas afectadas.
+    """
+    query = """
+        UPDATE messages m
+        SET analyzed = FALSE
+        FROM groups g
+        WHERE m.group_id = g.id
+          AND g.is_active = TRUE
+    """
+    params: list[Any] = []
+    if group_name is not None:
+        query += " AND g.name ILIKE %s"
+        params.append(f"%{group_name}%")
+    if since is not None:
+        query += " AND m.timestamp >= %s"
+        params.append(since)
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(query, params)
+        count = cur.rowcount
+        conn.commit()
+    return count
+
+
 def fetch_taxonomy() -> list[dict[str, Any]]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(

@@ -130,22 +130,28 @@ def run_classification_batch(limit: int | None = None, group_name: str | None = 
     processed = 0
     failed = 0
     gt_sampled = 0
-    successful_ids: list[int] = []
+    pending_ids: list[int] = []
 
     for i, msg in enumerate(messages, start=1):
         ok, haiku_payload = _classify_and_persist(msg)
         if ok:
             processed += 1
-            successful_ids.append(msg.id)
+            pending_ids.append(msg.id)
             if msg.id in sample_ids and haiku_payload is not None:
                 if _sample_with_sonnet(msg, haiku_payload):
                     gt_sampled += 1
         else:
             failed += 1
 
+        # Checkpoint every 25 messages so progress is persisted and crash-safe
         if i % 25 == 0:
+            mark_messages_analyzed(pending_ids)
+            pending_ids = []
             log.info("batch_progress", done=i, total=len(messages), failed=failed)
 
-    mark_messages_analyzed(successful_ids)
+    # Flush any remaining
+    if pending_ids:
+        mark_messages_analyzed(pending_ids)
+
     log.info("batch_done", processed=processed, failed=failed, ground_truth_sampled=gt_sampled)
     return BatchResult(processed=processed, failed=failed, ground_truth_sampled=gt_sampled)
