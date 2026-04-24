@@ -1,6 +1,12 @@
-import { getGroupsSummary } from '@/lib/queries'
+import { getGroupsSummary, getGlobalKPIs, type RangeKey } from '@/lib/queries'
 import Link from 'next/link'
+import { Suspense } from 'react'
 import GroupMeta from './components/GroupMeta'
+import DateRangeFilter from './components/DateRangeFilter'
+
+export const dynamic = 'force-dynamic'
+
+// ─── helpers ────────────────────────────────────────────────────────────────
 
 function SentimentBar({ value }: { value: number | null }) {
   if (value === null) return <span style={{ color: 'var(--text-muted)' }}>—</span>
@@ -33,29 +39,58 @@ function TimeAgo({ ts }: { ts: string | null }) {
   return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{label}</span>
 }
 
-export const dynamic = 'force-dynamic'
+// Sentiment 0–10 gauge
+function SentimentScore({ value }: { value: number | null }) {
+  if (value === null) return <span style={{ color: 'var(--text-muted)', fontSize: 28, fontWeight: 700 }}>—</span>
+  const color = value >= 7 ? '#10b981' : value >= 5 ? '#f59e0b' : '#ef4444'
+  const emoji  = value >= 7 ? '😊' : value >= 5 ? '😐' : '😟'
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+      <span style={{ fontSize: 28, fontWeight: 800, color }}>{value.toFixed(1)}</span>
+      <span style={{ fontSize: 18 }}>{emoji}</span>
+      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>/10</span>
+    </div>
+  )
+}
 
-export default async function HomePage() {
-  const groups = await getGroupsSummary()
+// ─── page ────────────────────────────────────────────────────────────────────
 
-  const totalMsgs = groups.reduce((s, g) => s + g.messages_today, 0)
-  const totalOpen = groups.reduce((s, g) => s + g.open_incidents, 0)
-  const totalProblems = groups.reduce((s, g) => s + g.bucket_b_today, 0)
-  const avgTtfr = groups.filter(g => g.avg_ttfr_minutes !== null)
-  const globalTtfr = avgTtfr.length > 0
-    ? Math.round(avgTtfr.reduce((s, g) => s + (g.avg_ttfr_minutes ?? 0), 0) / avgTtfr.length)
-    : null
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string>>
+}) {
+  const sp    = await searchParams
+  const range = (sp.range ?? 'hoy') as RangeKey
+  const from  = sp.from
+  const to    = sp.to
+
+  const [groups, kpis] = await Promise.all([
+    getGroupsSummary(),
+    getGlobalKPIs(range, from, to),
+  ])
+
+  const sentimentColor = kpis.avg_sentiment_010 == null ? 'var(--text-muted)'
+    : kpis.avg_sentiment_010 >= 7 ? 'var(--success)'
+    : kpis.avg_sentiment_010 >= 5 ? 'var(--warning)'
+    : 'var(--danger)'
+
+  const ttfrColor = kpis.avg_ttfr_minutes == null ? 'var(--text-muted)'
+    : kpis.avg_ttfr_minutes > 30 ? 'var(--danger)' : 'var(--success)'
 
   return (
     <div style={{ paddingBottom: 120 }}>
-      {/* Header */}
-      <div className="mb-8" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+
+      {/* ── Header ── */}
+      <div className="mb-6" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700, color: 'var(--text)', marginBottom: 4 }}>
             Vista General
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-            {groups.length} grupos activos · Hoy {new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}
+            {new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}
+            {' · '}
+            <span style={{ color: 'var(--brand-green)', fontWeight: 600 }}>{kpis.range_label}</span>
           </p>
         </div>
         <Link
@@ -72,72 +107,98 @@ export default async function HomePage() {
         </Link>
       </div>
 
-      {/* Global stats */}
-      <div className="grid grid-cols-4 gap-4 mb-8">
-        {([
-          {
-            label: 'Mensajes hoy',
-            sub: 'Total recibidos hoy',
-            value: totalMsgs.toLocaleString(),
-            color: 'var(--brand-green)',
-            href: null,
-          },
-          {
-            label: 'Tickets abiertos',
-            sub: 'Hilos de problema activos',
-            value: totalOpen,
-            color: totalOpen > 5 ? 'var(--danger)' : totalOpen > 2 ? 'var(--warning)' : 'var(--success)',
-            href: '/tickets?status=abierto',
-          },
-          {
-            label: 'Mensajes problema',
-            sub: 'Mensajes individuales Bucket B',
-            value: totalProblems,
-            color: totalProblems > 10 ? 'var(--danger)' : 'var(--warning)',
-            href: '/tickets',
-          },
-          {
-            label: 'TTFR prom (sem)',
-            sub: 'Tiempo 1ra respuesta',
-            value: globalTtfr !== null ? `${globalTtfr} min` : '—',
-            color: globalTtfr !== null && globalTtfr > 30 ? 'var(--danger)' : 'var(--success)',
-            href: '/analytics',
-          },
-        ] as const).map(stat => {
-          const inner = (
-            <>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-                {stat.label}
-              </div>
-              <div style={{ fontSize: 28, fontWeight: 700, color: stat.color, marginBottom: 4 }}>
-                {stat.value}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{stat.sub}</div>
-              {stat.href && (
-                <div style={{ fontSize: 11, color: 'var(--brand-green)', marginTop: 6, fontWeight: 600 }}>
-                  Ver →
-                </div>
-              )}
-            </>
-          )
-          return stat.href ? (
-            <Link key={stat.label} href={stat.href} style={{ textDecoration: 'none', color: 'inherit' }}>
-              <div className="stat-card" style={{ cursor: 'pointer', transition: 'box-shadow 0.15s', borderColor: 'var(--border)' }}
-                onMouseOver={(e) => (e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.08)')}
-                onMouseOut={(e)  => (e.currentTarget.style.boxShadow = '')}>
-                {inner}
-              </div>
-            </Link>
-          ) : (
-            <div key={stat.label} className="stat-card">{inner}</div>
-          )
-        })}
+      {/* ── Date range filter ── */}
+      <Suspense>
+        <DateRangeFilter />
+      </Suspense>
+
+      {/* ── KPI cards ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '16px', marginBottom: '32px' }}>
+
+        {/* 1. Grupos monitoreados */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Grupos monitoreados
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--brand-green)', marginBottom: 4 }}>
+            {kpis.total_groups}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Grupos activos totales</div>
+        </div>
+
+        {/* 2. Mensajes monitoreados */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Mensajes monitoreados
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--brand-green)', marginBottom: 4 }}>
+            {kpis.messages_in_range.toLocaleString()}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{kpis.range_label}</div>
+        </div>
+
+        {/* 3. Incidencias abiertas */}
+        <Link href={`/tickets?range=${range}${from ? `&from=${from}` : ''}${to ? `&to=${to}` : ''}`}
+          style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="stat-card" style={{ cursor: 'pointer' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+              Incidencias abiertas
+            </div>
+            <div style={{
+              fontSize: 28, fontWeight: 800, marginBottom: 4,
+              color: kpis.incidents_in_range > 5 ? 'var(--danger)' : kpis.incidents_in_range > 2 ? 'var(--warning)' : 'var(--success)',
+            }}>
+              {kpis.incidents_in_range}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Tickets creados · {kpis.range_label}</div>
+            <div style={{ fontSize: 11, color: 'var(--brand-green)', marginTop: 6, fontWeight: 600 }}>Ver tickets →</div>
+          </div>
+        </Link>
+
+        {/* 4. Sentiment de clientes */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Sentiment de clientes
+          </div>
+          <SentimentScore value={kpis.avg_sentiment_010} />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Promedio · {kpis.range_label}</div>
+          {/* Mini bar */}
+          {kpis.avg_sentiment_010 != null && (
+            <div style={{ marginTop: 8, height: 4, background: '#f1f5f9', borderRadius: 99, overflow: 'hidden' }}>
+              <div style={{
+                width: `${(kpis.avg_sentiment_010 / 10) * 100}%`,
+                height: '100%', borderRadius: 99,
+                background: sentimentColor,
+              }} />
+            </div>
+          )}
+        </div>
+
+        {/* 5. TTR promedio */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            TTR promedio
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: ttfrColor, marginBottom: 4 }}>
+            {kpis.avg_ttfr_minutes != null ? `${kpis.avg_ttfr_minutes} min` : '—'}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            1ª respuesta de agente 99 · {kpis.range_label}
+          </div>
+          {kpis.avg_ttfr_minutes != null && (
+            <div style={{ fontSize: 11, marginTop: 6, fontWeight: 600, color: ttfrColor }}>
+              {kpis.avg_ttfr_minutes <= 10 ? 'Excelente' : kpis.avg_ttfr_minutes <= 30 ? 'Aceptable' : 'Necesita mejora'}
+            </div>
+          )}
+        </div>
+
       </div>
 
-      {/* Groups table */}
+      {/* ── Groups table ── */}
       <div className="card" style={{ padding: 0, overflow: 'visible' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 style={{ fontSize: 15, fontWeight: 600 }}>Grupos monitoreados</h2>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{groups.length} grupos</span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', overflow: 'visible' }}>
           <thead>
@@ -150,7 +211,7 @@ export default async function HomePage() {
           <tbody>
             {groups.length === 0 && (
               <tr>
-                <td colSpan={9} style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
+                <td colSpan={10} style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
                   No hay grupos activos. Agrega el listener a un grupo de WhatsApp.
                 </td>
               </tr>

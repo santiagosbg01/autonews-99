@@ -700,6 +700,106 @@ export async function getAllTicketsFiltered(opts: {
   })) as TicketRow[]
 }
 
+// ─── Date range helpers ───────────────────────────────────────────────────────
+
+export type RangeKey = 'hoy' | 'semana' | 'mes' | 'todos' | 'custom'
+
+export function resolveDateRange(range: RangeKey, from?: string, to?: string): { from: Date | null; to: Date | null } {
+  const now = new Date()
+  const cdmx = 'America/Mexico_City'
+
+  function startOfDayCDMX(d: Date): Date {
+    const s = new Date(d.toLocaleString('en-US', { timeZone: cdmx }))
+    s.setHours(0, 0, 0, 0)
+    const offsetMs = d.getTime() - new Date(d.toLocaleString('en-US', { timeZone: 'UTC' })).getTime()
+    return new Date(s.getTime() - offsetMs)
+  }
+
+  if (range === 'custom' && from && to) {
+    return {
+      from: new Date(from + 'T00:00:00-06:00'),
+      to:   new Date(to   + 'T23:59:59-06:00'),
+    }
+  }
+  if (range === 'todos') return { from: null, to: null }
+
+  const todayStart = startOfDayCDMX(now)
+  if (range === 'hoy') return { from: todayStart, to: now }
+
+  const days = range === 'semana' ? 7 : 30
+  const past = new Date(todayStart)
+  past.setDate(past.getDate() - (days - 1))
+  return { from: past, to: now }
+}
+
+export type GlobalKPIs = {
+  total_groups: number
+  messages_in_range: number
+  incidents_in_range: number
+  avg_sentiment_010: number | null   // 0–10 scale
+  avg_ttfr_minutes: number | null
+  range_label: string
+}
+
+export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string): Promise<GlobalKPIs> {
+  const { from: f, to: t } = resolveDateRange(range, from, to)
+
+  // 1. Active groups
+  const { count: groupCount } = await supabaseAdmin
+    .from('groups').select('id', { count: 'exact', head: true }).eq('is_active', true)
+
+  // 2. Messages in range
+  let msgQ = supabaseAdmin.from('messages').select('id', { count: 'exact', head: true })
+  if (f) msgQ = msgQ.gte('timestamp', f.toISOString())
+  if (t) msgQ = msgQ.lte('timestamp', t.toISOString())
+  const { count: msgCount } = await msgQ
+
+  // 3. Incidents opened in range
+  let incQ = supabaseAdmin.from('incidents').select('id, ttfr_seconds', { count: 'exact' })
+  if (f) incQ = incQ.gte('opened_at', f.toISOString())
+  if (t) incQ = incQ.lte('opened_at', t.toISOString())
+  const { data: incData, count: incCount } = await incQ
+
+  // 4. Avg TTFR from incidents in range
+  const ttfrs = (incData ?? []).map((r: any) => r.ttfr_seconds).filter((v: any) => v != null) as number[]
+  const avgTtfr = ttfrs.length > 0
+    ? Math.round(ttfrs.reduce((a, b) => a + b, 0) / ttfrs.length / 60)
+    : null
+
+  // 5. Avg client sentiment in range (from analysis, only cliente/otro roles)
+  let sentQ = supabaseAdmin
+    .from('analysis')
+    .select('sentiment, messages!inner(timestamp, sender_role)')
+    .not('sentiment', 'is', null)
+    .in('messages.sender_role', ['cliente', 'otro'])
+  if (f) sentQ = (sentQ as any).gte('messages.timestamp', f.toISOString())
+  if (t) sentQ = (sentQ as any).lte('messages.timestamp', t.toISOString())
+  const { data: sentData } = await sentQ
+
+  let avgSentiment010: number | null = null
+  if (sentData && sentData.length > 0) {
+    const vals = (sentData as any[]).map(r => Number(r.sentiment)).filter(v => !isNaN(v))
+    if (vals.length > 0) {
+      const avg = vals.reduce((a, b) => a + b, 0) / vals.length
+      avgSentiment010 = Math.round(((avg + 1) / 2) * 100) / 10  // -1..1 → 0..10, 1 decimal
+    }
+  }
+
+  const rangeLabels: Record<string, string> = {
+    hoy: 'Hoy', semana: 'Últimos 7 días', mes: 'Últimos 30 días',
+    todos: 'Todo el tiempo', custom: `${from ?? ''} – ${to ?? ''}`,
+  }
+
+  return {
+    total_groups:       groupCount ?? 0,
+    messages_in_range:  msgCount   ?? 0,
+    incidents_in_range: incCount   ?? 0,
+    avg_sentiment_010:  avgSentiment010,
+    avg_ttfr_minutes:   avgTtfr,
+    range_label:        rangeLabels[range] ?? range,
+  }
+}
+
 export async function getGroupHealthTrend(groupId: number, days = 14): Promise<GroupHealthDay[]> {
   const since = new Date()
   since.setDate(since.getDate() - days)
