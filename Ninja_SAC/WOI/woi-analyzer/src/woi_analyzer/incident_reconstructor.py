@@ -32,16 +32,19 @@ ESCALATE_MEDIA_MIN = 120   # auto-escalate media urgency if no ACK in 2 hours
 PENDING_HOURS      = 4     # responded but still open after 4h → pendiente
 
 # Inactivity-based resolution: if no new messages after this many hours → resuelto
-INACTIVITY_RESOLVE_HOURS = 6
+INACTIVITY_RESOLVE_HOURS = 4
 
-# Categories that signal incident closure
-CLOSE_CATEGORIES = {
-    "confirmacion_resolucion",
-    "reporte_entrega",
-    "confirmacion_llegada",
-    "confirmacion_salida",
-    "confirmacion_evidencias",
-    "acuse_recibo",
+# STRONG close: clear resolution signal from ANY sender (unit left, delivery confirmed, etc.)
+STRONG_CLOSE_CATEGORIES = {
+    "confirmacion_resolucion",   # explicit "ya se resolvió"
+    "confirmacion_salida",       # unit left — incident over regardless of who says it
+    "confirmacion_evidencias",   # evidence submitted — delivery complete
+}
+
+# WEAK close: partial signals — only close when sent by an agent (avoid false positives)
+WEAK_CLOSE_CATEGORIES = {
+    "reporte_entrega",           # delivery reported (agent confirmation preferred)
+    "confirmacion_llegada",      # unit arrived — could mean start, not end
 }
 
 
@@ -191,13 +194,20 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
                 n = len(inc.message_ids)
                 inc.sentiment_avg = (prev * (n - 1) + sentiment) / n
 
-            # Cierre: is_incident_close flag O categoría de resolución reconocida
-            is_close_signal = (
+            # Cierre: tres caminos posibles
+            # 1. Claude ya clasificó como is_incident_close=True → cerrar de cualquier sender
+            # 2. Categoría FUERTE (salida confirmada, resolución explícita) → cualquier sender
+            # 3. Categoría DÉBIL (reporte entrega, llegada) → solo agente_99
+            is_strong_close = (
                 m["is_incident_close"]
-                or m["category"] in CLOSE_CATEGORIES
+                or m["category"] in STRONG_CLOSE_CATEGORIES
             )
-            # Exigir que el cierre venga de un agente para evitar falsos positivos
-            if is_close_signal and m["sender_role"] == "agente_99":
+            is_weak_close = (
+                not is_strong_close
+                and m["category"] in WEAK_CLOSE_CATEGORIES
+                and m["sender_role"] == "agente_99"
+            )
+            if is_strong_close or is_weak_close:
                 inc.closed_at = ts
                 finalized.append(open_incidents.pop(most_recent_owner))
 
@@ -450,9 +460,9 @@ def refresh_open_ticket_statuses() -> int:
 
         conn.commit()
 
-    # ── 3. Sonnet resolution check for ambiguous long-running tickets ─────────
+    # ── 3. Sonnet resolution check for any open ticket older than 3h ──────────
     # Runs outside the main transaction to avoid holding the connection
-    sonnet_resolved = _sonnet_resolution_pass(now, sonnet_cutoff)
+    sonnet_resolved = _sonnet_resolution_pass(now, now - timedelta(hours=3))
     updated += sonnet_resolved
 
     if updated:
@@ -462,22 +472,22 @@ def refresh_open_ticket_statuses() -> int:
 
 def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     """
-    Para tickets en 'pendiente' abiertos hace >8h con mensajes recientes,
-    pregunta a Sonnet si el hilo indica resolución.
-    Evita llamadas excesivas procesando máx. 10 tickets por ronda.
+    Para cualquier ticket abierto hace >3h, pregunta a Sonnet si el hilo indica
+    resolución. Evita llamadas excesivas procesando máx. 15 tickets por ronda y
+    respetando el cooldown de 3h entre checks del mismo ticket.
     """
     updated = 0
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT i.id, i.opened_at, i.category, i.urgency
+            SELECT i.id, i.opened_at, i.category, i.urgency, i.status
             FROM incidents i
-            WHERE i.status IN ('pendiente', 'respondido')
+            WHERE i.status NOT IN ('resuelto', 'escalado')
               AND i.closed_at IS NULL
               AND i.opened_at < %s
-              AND (i.sonnet_checked_at IS NULL OR i.sonnet_checked_at < NOW() - INTERVAL '6 hours')
+              AND (i.sonnet_checked_at IS NULL OR i.sonnet_checked_at < NOW() - INTERVAL '3 hours')
             ORDER BY i.opened_at ASC
-            LIMIT 10
+            LIMIT 15
             """,
             (cutoff,),
         )
@@ -486,16 +496,16 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     for ticket in tickets:
         incident_id = ticket["id"]
         try:
-            # Fetch last 10 messages of the incident
+            # Fetch last 20 messages for more context
             with connect() as conn2, conn2.cursor() as cur2:
                 cur2.execute(
                     """
-                    SELECT m.sender_role, m.content, a.category
+                    SELECT m.sender_role, m.sender_display_name, m.content, m.timestamp, a.category
                     FROM analysis a
                     JOIN messages m ON m.id = a.message_id
                     WHERE a.incident_id = %s AND m.content IS NOT NULL
                     ORDER BY m.timestamp DESC
-                    LIMIT 10
+                    LIMIT 20
                     """,
                     (incident_id,),
                 )

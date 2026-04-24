@@ -283,7 +283,7 @@ def generate_incident_summary(
         f"Urgencia: {urgency or 'baja'}\n"
         f"TTFR: {round(ttfr_seconds / 60, 1)} min\n" if ttfr_seconds else ""
         f"TTR: {round(ttr_seconds / 60, 1)} min\n" if ttr_seconds else ""
-        f"Estado: {'cerrada' if is_closed else 'abierta (timeout)'}\n"
+        f"Estado: {'cerrada operativamente' if is_closed else 'pendiente de cierre formal'}\n"
     )
 
     user_content = (
@@ -398,35 +398,54 @@ def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
     """
     Pregunta a Sonnet si el hilo de mensajes indica que el incidente fue resuelto.
     Retorna True si Sonnet determina que sí fue resuelto.
-    Usa el modelo más barato posible; respuesta esperada: JSON {"resolved": true/false, "reason": "..."}
+    Respuesta esperada: JSON {"resolved": true|false, "reason": "..."}
     """
     lines = []
     for m in messages:
         role = m.get("sender_role") or "otro"
-        content = (m.get("content") or "[media]")[:200]
+        name = m.get("sender_display_name") or ""
+        content = (m.get("content") or "[media]")[:250]
         cat = m.get("category") or ""
-        lines.append(f"[{role}] ({cat}): {content}")
+        ts = str(m.get("timestamp", ""))[:16]
+        lines.append(f"[{ts}] [{role}]{f' {name}' if name else ''} ({cat}): {content}")
 
     thread = "\n".join(lines)
+    system = (
+        "Eres un experto en operaciones logísticas de última milla. "
+        "Tu tarea es determinar si un incidente operativo fue RESUELTO basándote en el hilo de mensajes.\n\n"
+        "SEÑALES CLARAS DE RESOLUCIÓN (cualquiera implica resuelto=true):\n"
+        "- La unidad descargó, se retiró, salió o completó su tarea\n"
+        "- Se confirmó la entrega o recolección exitosa\n"
+        "- Se envió evidencia fotográfica de completado\n"
+        "- Alguien confirmó explícitamente que el problema se resolvió\n"
+        "- El hilo termina en silencio después de una respuesta del agente y no hay mensajes de queja\n\n"
+        "SEÑALES DE NO RESOLUCIÓN:\n"
+        "- El problema sigue activo sin respuesta final\n"
+        "- Hay mensajes recientes de queja o escalamiento\n"
+        "- El agente prometió resolver pero no hay confirmación de cierre\n\n"
+        "Responde SOLO con JSON: {\"resolved\": true|false, \"reason\": \"una frase\"}"
+    )
     prompt = (
         f"Categoría del incidente: {category or 'desconocida'}\n\n"
-        f"Últimos mensajes del hilo:\n{thread}\n\n"
-        "Analiza si el hilo indica que el incidente fue RESUELTO (el problema fue atendido "
-        "y no hay pendientes activos). Responde SOLO con este JSON:\n"
-        '{"resolved": true|false, "reason": "explicación breve en español"}'
+        f"Hilo de mensajes ({len(lines)} mensajes, cronológico):\n{thread}\n\n"
+        "¿Fue resuelto este incidente?"
     )
 
     try:
         response = get_client().messages.create(
-            model=CONFIG.anthropic.haiku_model,  # Haiku para mantener costo bajo
-            max_tokens=100,
+            model=CONFIG.anthropic.sonnet_model,  # Sonnet para mejor precisión
+            max_tokens=120,
+            system=system,
             messages=[{"role": "user", "content": prompt}],
         )
         text = "".join(
             getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
         ).strip()
         data = _extract_json(text)
-        return bool(data.get("resolved", False))
+        resolved = bool(data.get("resolved", False))
+        if resolved:
+            log.info("sonnet_resolution_detected", reason=data.get("reason", ""))
+        return resolved
     except Exception as e:
         log.warning("ask_is_resolved_failed", error=str(e))
         return False
