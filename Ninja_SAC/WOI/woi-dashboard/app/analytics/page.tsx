@@ -13,9 +13,15 @@ import {
   getFeedbackCounts,
   getMultiWeekTrend,
   getSameDayResolutionPct,
+  getGroupsSummary,
+  getGlobalKPIs,
+  getBriefingsForDate,
+  briefingSeverityScore,
+  getOpenChurnSignals,
   FEEDBACK_FIELD_LABEL,
   MIX_META,
   CATEGORY_ES,
+  type RangeKey,
 } from '@/lib/queries'
 import Link from 'next/link'
 import { Suspense } from 'react'
@@ -25,6 +31,8 @@ import ChurnAnalyticsCard from '@/app/components/ChurnAnalyticsCard'
 import TtfrByCategoryCard from '@/app/components/TtfrByCategoryCard'
 import AgentLeaderboardCard from '@/app/components/AgentLeaderboardCard'
 import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
+import DateRangeFilter from '@/app/components/DateRangeFilter'
+import ChurnAlertBanner from '@/app/components/ChurnAlertBanner'
 
 export const dynamic = 'force-dynamic'
 
@@ -158,13 +166,25 @@ export default async function AnalyticsPage({
   const groupId = sp.group   ? parseInt(sp.group) : null
   const days    = parseInt(period) || 30
 
+  // Executive KPI strip / briefing banner range (independent from the
+  // chart-period filter — drives only the top section).
+  const range  = (sp.range ?? 'hoy') as RangeKey
+  const kpiFrom = sp.from
+  const kpiTo   = sp.to
+
   // Multi-week trend lives on its own selector; defaults to 8w.
   const weeksRaw = sp.weeks ? parseInt(sp.weeks) : 8
   const weeks    = [4, 8, 12].includes(weeksRaw) ? weeksRaw : 8
 
   const { from, to } = resolveDates(period)
 
-  const [agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard, churnCounts, churnTrend, portfolioMix, ttfrByCategory, agentAnalysis, feedbackCounts, weeklyTrend, sameDay] = await Promise.all([
+  const [
+    agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard,
+    churnCounts, churnTrend, portfolioMix, ttfrByCategory, agentAnalysis, feedbackCounts,
+    weeklyTrend, sameDay,
+    // Executive top-section data
+    groupsSummary, kpis, briefings, churnTop,
+  ] = await Promise.all([
     getAgentLeaderboard(),
     getOpenIncidents(),
     getDailyReports(14),
@@ -179,7 +199,40 @@ export default async function AnalyticsPage({
     getFeedbackCounts(Math.min(days, 90)),
     getMultiWeekTrend(weeks, groupId),
     getSameDayResolutionPct(from, to, groupId),
+    getGroupsSummary(),
+    getGlobalKPIs(range, kpiFrom, kpiTo),
+    getBriefingsForDate(),
+    getOpenChurnSignals({ limit: 5 }),
   ])
+
+  // ── Executive section computed values (moved from /grupos) ─────────────────
+  const topBriefing = briefings.length
+    ? [...briefings].sort((a, b) => briefingSeverityScore(b) - briefingSeverityScore(a))[0]
+    : null
+  const groupsWithChurn   = briefings.filter(b => (b.briefing.churn_signals?.length ?? 0) > 0).length
+  const totalChurnSignals = briefings.reduce((acc, b) => acc + (b.briefing.churn_signals?.length ?? 0), 0)
+
+  const portfolioHealth = groupsSummary.length
+    ? Math.round(groupsSummary.reduce((acc, g) => acc + g.health.total, 0) / groupsSummary.length)
+    : null
+  const groupsCritical = groupsSummary.filter(g => g.health.band === 'critical').length
+  const groupsWarning  = groupsSummary.filter(g => g.health.band === 'warning').length
+  const portfolioColor = portfolioHealth == null ? 'var(--text-muted)'
+    : portfolioHealth >= 80 ? 'var(--success)'
+    : portfolioHealth >= 70 ? '#0369a1'
+    : portfolioHealth >= 55 ? 'var(--warning)' : 'var(--danger)'
+
+  const sentimentColor = kpis.avg_sentiment_010 == null ? 'var(--text-muted)'
+    : kpis.avg_sentiment_010 >= 7 ? 'var(--success)'
+    : kpis.avg_sentiment_010 >= 5 ? 'var(--warning)'
+    : 'var(--danger)'
+  const ttfrExecColor = kpis.avg_ttfr_minutes == null ? 'var(--text-muted)'
+    : kpis.avg_ttfr_minutes > 30 ? 'var(--danger)' : 'var(--success)'
+  const ttrExecColor  = kpis.avg_ttr_minutes == null ? 'var(--text-muted)'
+    : kpis.avg_ttr_minutes > 240 ? 'var(--danger)'
+    : kpis.avg_ttr_minutes > 90  ? 'var(--warning)' : 'var(--success)'
+  const fmtMinExec = (v: number | null) =>
+    v == null ? '—' : v < 60 ? `${v} min` : `${Math.floor(v / 60)}h ${v % 60}m`
 
   // Fetch groups list for the filter dropdown
   const { supabaseAdmin } = await import('@/lib/supabase')
@@ -220,10 +273,226 @@ export default async function AnalyticsPage({
 
   return (
     <div style={{ paddingBottom: 80 }}>
+
+      {/* ════════════════════════════════════════════════════════════════════
+          EXECUTIVE OVERVIEW — top of the page.
+          Briefing banner + range filter + portfolio KPIs.
+          (Moved from the legacy /grupos landing page on 2026-04-25.)
+      ════════════════════════════════════════════════════════════════════ */}
+
+      {/* Morning Briefings — multi-group summary banner */}
+      {briefings.length > 0 && (
+        <Link
+          href="/briefing"
+          style={{ textDecoration: 'none', color: 'inherit', display: 'block', marginBottom: 18 }}
+        >
+          <div style={{
+            background: groupsWithChurn > 0
+              ? 'linear-gradient(135deg, #fef2f2 0%, #fff7ed 100%)'
+              : 'linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%)',
+            border: `1px solid ${groupsWithChurn > 0 ? '#fecaca' : '#bbf7d0'}`,
+            borderRadius: 14,
+            padding: '18px 22px',
+            cursor: 'pointer',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
+            transition: 'transform 0.15s, box-shadow 0.15s',
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, color: '#16a34a',
+                  background: '#dcfce7', padding: '3px 10px', borderRadius: 999, letterSpacing: '0.05em',
+                }}>
+                  MORNING BRIEFINGS
+                </span>
+                <span style={{ fontSize: 11, color: '#475569', fontWeight: 500 }}>
+                  {briefings.length} {briefings.length === 1 ? 'grupo' : 'grupos'} · 6 am hora local
+                </span>
+                {groupsWithChurn > 0 && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, color: '#dc2626',
+                    background: '#fee2e2', padding: '3px 10px', borderRadius: 999, letterSpacing: '0.05em',
+                  }}>
+                    {totalChurnSignals} CHURN SIGNAL{totalChurnSignals > 1 ? 'S' : ''} EN {groupsWithChurn} {groupsWithChurn === 1 ? 'GRUPO' : 'GRUPOS'}
+                  </span>
+                )}
+              </div>
+              {topBriefing?.headline && (
+                <>
+                  <div style={{ fontSize: 11, color: '#475569', fontWeight: 600, marginBottom: 2 }}>
+                    Top priority — {topBriefing.group_name}
+                  </div>
+                  <p style={{
+                    fontSize: 14, fontWeight: 600, color: '#0f172a', margin: 0, lineHeight: 1.5,
+                    overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                  }}>
+                    {topBriefing.headline}
+                  </p>
+                </>
+              )}
+            </div>
+            <div style={{
+              fontSize: 12, fontWeight: 700, color: '#16a34a',
+              whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4,
+            }}>
+              Ver todos →
+            </div>
+          </div>
+        </Link>
+      )}
+
+      {/* Churn-risk banner (top-5 most recent open signals) */}
+      {churnTop.length > 0 && (
+        <ChurnAlertBanner signals={churnTop} variant="banner" collapsedByDefault />
+      )}
+
+      {/* Date range filter — drives the executive KPI strip below */}
+      <Suspense>
+        <DateRangeFilter />
+      </Suspense>
+
+      {/* Executive KPI cards — portfolio health + business KPIs */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14, marginBottom: 32 }}>
+
+        {/* 0. Portfolio Health Score */}
+        <div className="stat-card" style={{ borderLeft: `3px solid ${portfolioColor}` }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Health Score
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: portfolioColor, marginBottom: 4, lineHeight: 1 }}>
+            {portfolioHealth != null ? `${portfolioHealth}` : '—'}
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)', marginLeft: 4 }}>/ 100</span>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {groupsCritical > 0
+              ? <span style={{ color: 'var(--danger)', fontWeight: 600 }}>{groupsCritical} crítico{groupsCritical > 1 ? 's' : ''}</span>
+              : groupsWarning > 0
+                ? <span style={{ color: 'var(--warning)', fontWeight: 600 }}>{groupsWarning} en atención</span>
+                : 'Portfolio saludable'}
+          </div>
+        </div>
+
+        {/* 1. Grupos monitoreados */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Grupos monitoreados
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--brand-green)', marginBottom: 4 }}>
+            {kpis.total_groups}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Grupos activos totales</div>
+        </div>
+
+        {/* 2. Mensajes monitoreados */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Mensajes monitoreados
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--brand-green)', marginBottom: 4 }}>
+            {kpis.messages_in_range.toLocaleString()}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{kpis.range_label}</div>
+        </div>
+
+        {/* 3. Incidencias creadas */}
+        <Link href={`/tickets?range=${range}${kpiFrom ? `&from=${kpiFrom}` : ''}${kpiTo ? `&to=${kpiTo}` : ''}`}
+          style={{ textDecoration: 'none', color: 'inherit' }}>
+          <div className="stat-card" style={{ cursor: 'pointer' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+              Incidencias abiertas
+            </div>
+            <div style={{
+              fontSize: 28, fontWeight: 800, marginBottom: 4,
+              color: kpis.incidents_in_range > 5 ? 'var(--danger)' : kpis.incidents_in_range > 2 ? 'var(--warning)' : 'var(--success)',
+            }}>
+              {kpis.incidents_in_range}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Tickets creados · {kpis.range_label}</div>
+            <div style={{ fontSize: 11, color: 'var(--brand-green)', marginTop: 6, fontWeight: 600 }}>Ver tickets →</div>
+          </div>
+        </Link>
+
+        {/* 4. Sentiment de clientes */}
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            Sentiment de clientes
+          </div>
+          {kpis.avg_sentiment_010 == null ? (
+            <span style={{ color: 'var(--text-muted)', fontSize: 28, fontWeight: 700 }}>—</span>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+              <span style={{
+                fontSize: 28, fontWeight: 800,
+                color: kpis.avg_sentiment_010 >= 7 ? '#10b981' : kpis.avg_sentiment_010 >= 5 ? '#f59e0b' : '#ef4444',
+              }}>
+                {kpis.avg_sentiment_010.toFixed(1)}
+              </span>
+              <span style={{ fontSize: 18 }}>
+                {kpis.avg_sentiment_010 >= 7 ? '😊' : kpis.avg_sentiment_010 >= 5 ? '😐' : '😟'}
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>/10</span>
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Promedio · {kpis.range_label}</div>
+          {kpis.avg_sentiment_010 != null && (
+            <div style={{ marginTop: 8, height: 4, background: '#f1f5f9', borderRadius: 99, overflow: 'hidden' }}>
+              <div style={{
+                width: `${(kpis.avg_sentiment_010 / 10) * 100}%`,
+                height: '100%', borderRadius: 99,
+                background: sentimentColor,
+              }} />
+            </div>
+          )}
+        </div>
+
+        {/* 5. TTFR promedio */}
+        <div className="stat-card" title="TTFR — Tiempo desde que el cliente abre el ticket hasta la primera respuesta sustantiva del agente 99.">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            TTFR promedio
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: ttfrExecColor, marginBottom: 4 }}>
+            {fmtMinExec(kpis.avg_ttfr_minutes)}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            1ª respuesta del agente 99 · SLA 30m · {kpis.range_label}
+          </div>
+          {kpis.avg_ttfr_minutes != null && (
+            <div style={{ fontSize: 11, marginTop: 6, fontWeight: 600, color: ttfrExecColor }}>
+              {kpis.avg_ttfr_minutes <= 10 ? 'Excelente' : kpis.avg_ttfr_minutes <= 30 ? 'Aceptable' : 'Necesita mejora'}
+            </div>
+          )}
+        </div>
+
+        {/* 6. TTR promedio */}
+        <div className="stat-card" title="TTR — Tiempo total desde que se abre el ticket hasta que se resuelve. Incluye TTFR + tiempo trabajando el caso.">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            TTR promedio
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: ttrExecColor, marginBottom: 4 }}>
+            {fmtMinExec(kpis.avg_ttr_minutes)}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            Resolución completa · {kpis.range_label}
+          </div>
+          {kpis.avg_ttr_minutes != null && (
+            <div style={{ fontSize: 11, marginTop: 6, fontWeight: 600, color: ttrExecColor }}>
+              {kpis.avg_ttr_minutes <= 60  ? 'Excelente' :
+               kpis.avg_ttr_minutes <= 90  ? 'Aceptable' :
+               kpis.avg_ttr_minutes <= 240 ? 'Atención'  : 'Crítico'}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ════════════════════════════════════════════════════════════════════
+          OPERATIONAL DETAIL — charts, scorecard, agent breakdowns, etc.
+          Driven by its own period filter (7d / 30d / 90d / todos).
+      ════════════════════════════════════════════════════════════════════ */}
+
       {/* ── Compact header: title + filters on same row ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: 20, fontWeight: 700, color: '#111827', margin: 0 }}>Analytics</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700, color: '#111827', margin: 0 }}>Tendencias y detalle operativo</h1>
           <p style={{ color: '#6b7280', fontSize: 13, marginTop: 2 }}>
             {periodLabel[period] ?? period}
             {groupId ? ` · ${groups.find(g => g.id === groupId)?.name ?? 'grupo'}` : ' · todos los grupos'}
