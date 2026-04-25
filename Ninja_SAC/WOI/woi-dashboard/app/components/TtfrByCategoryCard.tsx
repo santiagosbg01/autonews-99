@@ -5,12 +5,11 @@ import type { TtfrByCategoryRow } from '@/lib/queries'
 
 const SLA_TARGET_MIN = 30 // matches HEALTH_SLA_TTFR_MIN
 
-type SortKey = 'count' | 'avg_ttfr_min' | 'p90_ttfr_min' | 'resolution_rate' | 'escalated'
+type SortKey = 'count' | 'avg_ttfr_min' | 'resolution_rate' | 'escalated'
 
 const SORT_LABEL: Record<SortKey, string> = {
   count: 'volumen',
   avg_ttfr_min: 'TTFR avg',
-  p90_ttfr_min: 'TTFR p90',
   resolution_rate: 'resolución',
   escalated: 'escaladas',
 }
@@ -70,7 +69,6 @@ export default function TtfrByCategoryCard({ rows, periodLabel }: { rows: TtfrBy
     const bv = (b[sortKey] ?? 0) as number
     return desc ? bv - av : av - bv
   })
-  const maxTtfr = Math.max(...rows.map((r) => r.p90_ttfr_min ?? 0), SLA_TARGET_MIN)
   const totalCount = rows.reduce((s, r) => s + r.count, 0)
   const overallAvg = (() => {
     let num = 0; let den = 0
@@ -127,8 +125,6 @@ export default function TtfrByCategoryCard({ rows, periodLabel }: { rows: TtfrBy
               <th style={thStyle}>Categoría</th>
               <SortableTh label="Volumen"    active={sortKey === 'count'}           desc={desc} onClick={() => setSort('count')} />
               <SortableTh label="TTFR avg"   active={sortKey === 'avg_ttfr_min'}    desc={desc} onClick={() => setSort('avg_ttfr_min')} />
-              <th style={thStyle}>p50</th>
-              <SortableTh label="p90"        active={sortKey === 'p90_ttfr_min'}    desc={desc} onClick={() => setSort('p90_ttfr_min')} />
               <th style={thStyle}>TTR avg</th>
               <SortableTh label="Resolución" active={sortKey === 'resolution_rate'} desc={desc} onClick={() => setSort('resolution_rate')} />
               <SortableTh label="Escaladas"  active={sortKey === 'escalated'}       desc={desc} onClick={() => setSort('escalated')} />
@@ -138,7 +134,6 @@ export default function TtfrByCategoryCard({ rows, periodLabel }: { rows: TtfrBy
           <tbody>
             {sorted.map((r, i) => {
               const tColor = ttfrColor(r.avg_ttfr_min)
-              const barWidth = r.p90_ttfr_min != null ? Math.min(100, (r.p90_ttfr_min / maxTtfr) * 100) : 0
               return (
                 <tr key={r.category} style={{ borderTop: i > 0 ? '1px solid #f1f5f9' : 'none' }}>
                   <td style={{ ...tdStyle, fontWeight: 600, color: '#0f172a' }}>
@@ -152,17 +147,6 @@ export default function TtfrByCategoryCard({ rows, periodLabel }: { rows: TtfrBy
                   </td>
                   <td style={{ ...tdStyle, color: tColor, fontWeight: 700, background: bgFor(r.avg_ttfr_min) }}>
                     {fmtMin(r.avg_ttfr_min)}
-                  </td>
-                  <td style={tdStyle}>
-                    <span style={{ color: '#475569', fontWeight: 500 }}>{fmtMin(r.p50_ttfr_min)}</span>
-                  </td>
-                  <td style={{ ...tdStyle, color: ttfrColor(r.p90_ttfr_min), fontWeight: 600 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ minWidth: 38 }}>{fmtMin(r.p90_ttfr_min)}</span>
-                      <div style={{ flex: 1, minWidth: 50, height: 5, background: '#f1f5f9', borderRadius: 99, overflow: 'hidden' }}>
-                        <div style={{ width: `${barWidth}%`, height: '100%', background: ttfrColor(r.p90_ttfr_min), borderRadius: 99 }} />
-                      </div>
-                    </div>
                   </td>
                   <td style={tdStyle}>
                     <span style={{ color: '#475569' }}>{fmtMin(r.avg_ttr_min)}</span>
@@ -198,9 +182,6 @@ export default function TtfrByCategoryCard({ rows, periodLabel }: { rows: TtfrBy
         <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 99, background: '#0369a1', marginRight: 4 }} />≤ {SLA_TARGET_MIN}m (SLA)</span>
         <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 99, background: '#f59e0b', marginRight: 4 }} />≤ 60m</span>
         <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 99, background: '#ef4444', marginRight: 4 }} />&gt; 60m</span>
-        <span style={{ marginLeft: 'auto' }}>
-          <strong style={{ color: '#0f172a' }}>p50/p90</strong> = mediana / percentil 90 del tiempo a primera respuesta.
-        </span>
       </div>
     </div>
   )
