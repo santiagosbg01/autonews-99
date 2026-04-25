@@ -1,4 +1,4 @@
-import { getTicketDetail, getTicketStatusLogs, getChurnSignalsForIncident, getOpenChurnSignals, listFeedbackForIncident, TICKET_STATUS_META, CATEGORY_ES, type TicketStatus } from '@/lib/queries'
+import { getTicketDetail, getTicketStatusLogs, getChurnSignalsForIncident, getOpenChurnSignals, listFeedbackForIncident, TICKET_STATUS_META, RESOLUTION_SOURCE_META, CATEGORY_ES, type TicketStatus } from '@/lib/queries'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import StatusChanger from '@/app/components/StatusChanger'
@@ -202,6 +202,46 @@ export default async function TicketDetailPage({
             </div>
           )}
 
+          {/* Resolution reason — why this ticket was closed */}
+          {(ticket.resolution_reason || ticket.resolution_source || status === 'no_resuelto_eod') && (() => {
+            const sourceMeta = ticket.resolution_source
+              ? RESOLUTION_SOURCE_META[ticket.resolution_source]
+              : null
+            const isUnresolvedEod = status === 'no_resuelto_eod'
+            const accentColor = sourceMeta?.color ?? (isUnresolvedEod ? '#b91c1c' : '#10b981')
+            const bg = isUnresolvedEod ? '#fef2f2' : '#f0fdf4'
+            const border = isUnresolvedEod ? '#fecaca' : '#bbf7d0'
+            return (
+              <div className="card" style={{ padding: '14px 18px', background: bg, border: `1px solid ${border}` }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, color: accentColor,
+                    background: '#fff', padding: '3px 10px', borderRadius: 99, letterSpacing: '0.06em',
+                  }}>
+                    {isUnresolvedEod ? 'NO RESUELTO AL CIERRE DEL DÍA' : 'POR QUÉ SE CERRÓ'}
+                  </span>
+                  {sourceMeta && (
+                    <span style={{ fontSize: 12, color: sourceMeta.color, fontWeight: 600 }}>
+                      <span style={{ marginRight: 6 }}>{sourceMeta.emoji}</span>
+                      {sourceMeta.label}
+                    </span>
+                  )}
+                </div>
+                {ticket.resolution_reason ? (
+                  <p style={{ fontSize: 13, color: '#1f2937', lineHeight: 1.6, margin: 0 }}>
+                    {ticket.resolution_reason}
+                  </p>
+                ) : (
+                  <p style={{ fontSize: 13, color: '#64748b', fontStyle: 'italic', margin: 0 }}>
+                    {isUnresolvedEod
+                      ? 'El día cerró sin evidencia clara de que la queja original fuera atendida.'
+                      : 'Sin razón registrada.'}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
+
           {/* Classification feedback (T07) */}
           <ClassificationFeedbackCard
             incidentId={ticket.id}
@@ -321,7 +361,11 @@ export default async function TicketDetailPage({
             {status === 'pendiente' && (
               <TimelineStep label="Pendiente" timestamp={ticket.first_response_at} tz={tz} color="#f97316" done={true} />
             )}
-            <TimelineStep label="Resuelto"   timestamp={ticket.closed_at}       tz={tz} color="#10b981" done={!!ticket.closed_at} last />
+            {status === 'no_resuelto_eod' ? (
+              <TimelineStep label="No resuelto al EOD" timestamp={ticket.closed_at} tz={tz} color="#b91c1c" done={true} last />
+            ) : (
+              <TimelineStep label="Resuelto"   timestamp={ticket.closed_at}       tz={tz} color="#10b981" done={!!ticket.closed_at} last />
+            )}
           </div>
 
           {/* Ticket metadata */}

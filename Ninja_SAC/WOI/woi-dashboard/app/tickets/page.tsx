@@ -88,7 +88,7 @@ export default async function TicketsPage({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-            <Link href="/" style={{ color: 'var(--text-muted)', fontSize: '13px', textDecoration: 'none' }}>
+            <Link href="/analytics" style={{ color: 'var(--text-muted)', fontSize: '13px', textDecoration: 'none' }}>
               ← Dashboard
             </Link>
           </div>

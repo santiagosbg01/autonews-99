@@ -12,6 +12,7 @@ import {
   getAgentAnalysis,
   getFeedbackCounts,
   getMultiWeekTrend,
+  getSameDayResolutionPct,
   FEEDBACK_FIELD_LABEL,
   MIX_META,
   CATEGORY_ES,
@@ -163,7 +164,7 @@ export default async function AnalyticsPage({
 
   const { from, to } = resolveDates(period)
 
-  const [agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard, churnCounts, churnTrend, portfolioMix, ttfrByCategory, agentAnalysis, feedbackCounts, weeklyTrend] = await Promise.all([
+  const [agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard, churnCounts, churnTrend, portfolioMix, ttfrByCategory, agentAnalysis, feedbackCounts, weeklyTrend, sameDay] = await Promise.all([
     getAgentLeaderboard(),
     getOpenIncidents(),
     getDailyReports(14),
@@ -177,6 +178,7 @@ export default async function AnalyticsPage({
     getAgentAnalysis(from, to, groupId),
     getFeedbackCounts(Math.min(days, 90)),
     getMultiWeekTrend(weeks, groupId),
+    getSameDayResolutionPct(from, to, groupId),
   ])
 
   // Fetch groups list for the filter dropdown
@@ -236,7 +238,7 @@ export default async function AnalyticsPage({
       <AnalyticsCharts data={timeSeries} periodLabel={periodLabel[period] ?? period} />
 
       {/* ── KPI Summary cards — below charts ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 28 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 28 }}>
         {[
           {
             label: 'Incidencias abiertas',
@@ -273,6 +275,19 @@ export default async function AnalyticsPage({
             bg: '#fff',
             href: null,
             tooltip: 'Porcentaje de días donde el TTFR promedio fue ≤15 min.',
+          },
+          {
+            label: '% resuelto mismo día',
+            value: sameDay.pct != null ? `${sameDay.pct}%` : '—',
+            sub: sameDay.unresolved_eod > 0
+              ? `${sameDay.unresolved_eod} no resueltas al EOD`
+              : `${sameDay.resolved_same_day}/${sameDay.total} incidencias`,
+            color: sameDay.pct != null && sameDay.pct >= 80
+              ? '#10b981'
+              : sameDay.pct != null && sameDay.pct >= 60 ? '#f59e0b' : '#ef4444',
+            bg: sameDay.unresolved_eod > 0 ? '#fef2f2' : '#fff',
+            href: '/tickets?status=no_resuelto_eod',
+            tooltip: 'De las incidencias abiertas en el rango, qué % se cerraron como "resuelto" en el MISMO día calendario (en la TZ del grupo). Si una incidencia no se resuelve antes del cierre operativo del día, se marca como "no_resuelto_eod" y baja este KPI.',
           },
           {
             label: 'Tipos de problema',

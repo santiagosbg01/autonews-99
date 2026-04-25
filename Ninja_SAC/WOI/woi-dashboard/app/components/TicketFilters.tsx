@@ -7,7 +7,7 @@ type Props = {
   groups: GroupFilter[]
 }
 
-const STATUSES = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto']
+const STATUSES = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto', 'no_resuelto_eod']
 const URGENCIES = ['alta', 'media', 'baja']
 
 export default function TicketFilters({ groups }: Props) {

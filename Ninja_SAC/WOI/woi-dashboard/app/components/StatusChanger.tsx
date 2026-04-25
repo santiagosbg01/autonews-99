@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { TICKET_STATUS_META } from '@/lib/queries'
 
-const STATUSES = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto'] as const
+const STATUSES = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto', 'no_resuelto_eod'] as const
 type Status = typeof STATUSES[number]
 
 type Props = {

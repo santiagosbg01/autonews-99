@@ -19,7 +19,7 @@ export async function PATCH(
   }
 
   const { status, changed_by = 'ops_user', reason } = body
-  const VALID = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto']
+  const VALID = ['abierto', 'respondido', 'pendiente', 'escalado', 'resuelto', 'no_resuelto_eod']
   if (!status || !VALID.includes(status)) {
     return NextResponse.json({ error: `status must be one of: ${VALID.join(', ')}` }, { status: 400 })
   }

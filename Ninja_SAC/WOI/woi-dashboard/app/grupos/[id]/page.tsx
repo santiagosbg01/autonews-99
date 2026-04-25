@@ -110,7 +110,7 @@ export default async function GroupPage({ params, searchParams }: {
       <div className="flex items-start justify-between mb-6">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <Link href="/" style={{ color: 'var(--text-muted)', fontSize: 13, textDecoration: 'none' }}>← Grupos</Link>
+            <Link href="/grupos" style={{ color: 'var(--text-muted)', fontSize: 13, textDecoration: 'none' }}>← Grupos</Link>
           </div>
           <h1 style={{ fontSize: 22, fontWeight: 700 }}>{group.name}</h1>
           <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>

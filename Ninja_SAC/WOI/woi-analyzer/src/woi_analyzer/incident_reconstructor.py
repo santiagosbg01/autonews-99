@@ -94,6 +94,11 @@ class IncidentCandidate:
     sentiment_end: float | None
     sentiment_avg: float | None
     timezone: str | None
+    # Why/how this incident was closed (used only when closed_at is set).
+    # 'agent_signal' = strong/weak close from agente_99, 'customer_signal' = strong
+    # close from a non-agent (cliente confirmed delivery, etc.). None when still open.
+    resolution_source: str | None = None
+    resolution_reason: str | None = None
 
 
 def _fetch_group_messages_for_reconstruction(group_id: int, since: datetime) -> list[dict[str, Any]]:
@@ -209,6 +214,18 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
             )
             if is_strong_close or is_weak_close:
                 inc.closed_at = ts
+                # Track origin so the dashboard can audit and the EOD pass can
+                # tell apart explicit closes from inferred ones.
+                if m["sender_role"] == "agente_99":
+                    inc.resolution_source = "agent_signal"
+                    inc.resolution_reason = (
+                        f"Agente cerró el ticket con categoría '{m['category']}'."
+                    )
+                else:
+                    inc.resolution_source = "customer_signal"
+                    inc.resolution_reason = (
+                        f"{m['sender_role'] or 'cliente'} confirmó cierre con categoría '{m['category']}'."
+                    )
                 finalized.append(open_incidents.pop(most_recent_owner))
 
     # Los que quedaron abiertos al final del batch se mantienen como open
@@ -268,6 +285,8 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         first_response_at = COALESCE(first_response_at, %s),
                         first_response_by = COALESCE(first_response_by, %s),
                         resolution_at     = %s,
+                        resolution_source = COALESCE(resolution_source, %s),
+                        resolution_reason = COALESCE(resolution_reason, %s),
                         sentiment_end     = %s,
                         sentiment_avg     = %s,
                         message_count     = %s,
@@ -283,6 +302,7 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         c.closed_at, c.category, c.urgency,
                         c.first_response_at, c.first_response_by,
                         c.closed_at,
+                        c.resolution_source, c.resolution_reason,
                         c.sentiment_end, c.sentiment_avg,
                         len(c.message_ids), ttfr, ttr,
                         status, escalated_at, escalated_reason,
@@ -295,15 +315,17 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                     INSERT INTO incidents (
                         group_id, opened_at, closed_at, category, urgency,
                         first_response_at, first_response_by, resolution_at,
+                        resolution_source, resolution_reason,
                         sentiment_start, sentiment_end, sentiment_avg,
                         owner_phone, message_count, ttfr_seconds, ttr_seconds, timezone,
                         status, escalated_at, escalated_reason
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                     """,
                     (
                         c.group_id, c.opened_at, c.closed_at, c.category, c.urgency,
                         c.first_response_at, c.first_response_by, c.closed_at,
+                        c.resolution_source, c.resolution_reason,
                         c.sentiment_start, c.sentiment_end, c.sentiment_avg,
                         c.owner_phone, len(c.message_ids), ttfr, ttr, c.timezone,
                         status, escalated_at, escalated_reason,
@@ -375,18 +397,26 @@ def _log_status_change(cur, incident_id: int, from_status: str, to_status: str, 
     )
 
 
+# How long a ticket must be open before Sonnet starts evaluating it.
+# Lower = faster detection of quick resolutions, more API spend.
+SONNET_MIN_OPEN_MINUTES = 30
+# Cooldown between Sonnet checks of the same ticket (avoids burning tokens).
+SONNET_COOLDOWN_HOURS = 1
+# Max tickets evaluated per scheduler tick (rate-limit).
+SONNET_BATCH_SIZE = 30
+
+
 def refresh_open_ticket_statuses() -> int:
     """
     Recorre todos los tickets abiertos/respondidos y:
     1. Recalcula SLA (escalado, pendiente) basado en tiempos.
     2. Detecta resolución por inactividad: sin mensajes nuevos en INACTIVITY_RESOLVE_HOURS.
-    3. Para tickets en estado ambiguo (pendiente >8h), pregunta a Sonnet si el hilo
-       indica resolución.
+    3. Para tickets abiertos ≥SONNET_MIN_OPEN_MINUTES, pregunta a Sonnet si el hilo
+       indica resolución implícita (la queja original ya fue atendida).
     Escribe en ticket_status_logs cada cambio con source='auto'.
     """
     now = datetime.now().astimezone()
     inactivity_cutoff = now - timedelta(hours=INACTIVITY_RESOLVE_HOURS)
-    sonnet_cutoff     = now - timedelta(hours=8)
 
     with connect() as conn, conn.cursor() as cur:
         # Fetch open/in-progress tickets + last message timestamp
@@ -420,17 +450,21 @@ def refresh_open_ticket_statuses() -> int:
                 and last_msg_at < inactivity_cutoff
                 and old_status not in ("resuelto", "escalado")
             ):
+                reason = f"Sin actividad por {INACTIVITY_RESOLVE_HOURS}h tras respuesta del agente."
                 cur.execute(
                     """
                     UPDATE incidents
-                    SET status = 'resuelto', closed_at = %s,
-                        resolution_at = %s, updated_at = NOW()
+                    SET status            = 'resuelto',
+                        closed_at         = %s,
+                        resolution_at     = %s,
+                        resolution_source = COALESCE(resolution_source, 'inactivity'),
+                        resolution_reason = COALESCE(resolution_reason, %s),
+                        updated_at        = NOW()
                     WHERE id = %s
                     """,
-                    (last_msg_at, last_msg_at, incident_id),
+                    (last_msg_at, last_msg_at, reason, incident_id),
                 )
-                _log_status_change(cur, incident_id, old_status, "resuelto",
-                                   f"Sin actividad por {INACTIVITY_RESOLVE_HOURS}h con respuesta previa", "auto")
+                _log_status_change(cur, incident_id, old_status, "resuelto", reason, "auto")
                 updated += 1
                 log.info("ticket_resolved_inactivity", incident_id=incident_id,
                          last_msg_at=str(last_msg_at))
@@ -460,9 +494,9 @@ def refresh_open_ticket_statuses() -> int:
 
         conn.commit()
 
-    # ── 3. Sonnet resolution check for any open ticket older than 3h ──────────
-    # Runs outside the main transaction to avoid holding the connection
-    sonnet_resolved = _sonnet_resolution_pass(now, now - timedelta(hours=3))
+    # ── 3. Sonnet resolution pass for tickets open ≥SONNET_MIN_OPEN_MINUTES ──
+    sonnet_cutoff = now - timedelta(minutes=SONNET_MIN_OPEN_MINUTES)
+    sonnet_resolved = _sonnet_resolution_pass(now, sonnet_cutoff)
     updated += sonnet_resolved
 
     if updated:
@@ -472,22 +506,24 @@ def refresh_open_ticket_statuses() -> int:
 
 def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     """
-    Para cualquier ticket abierto hace >3h, pregunta a Sonnet si el hilo indica
-    resolución. Evita llamadas excesivas procesando máx. 15 tickets por ronda y
-    respetando el cooldown de 3h entre checks del mismo ticket.
+    Para cualquier ticket abierto hace ≥SONNET_MIN_OPEN_MINUTES, pregunta a Sonnet
+    si el hilo indica resolución implícita. Procesa máx. SONNET_BATCH_SIZE tickets
+    por ronda y respeta cooldown de SONNET_COOLDOWN_HOURS entre checks del mismo
+    ticket. Persiste el `reason` devuelto por Sonnet en `resolution_reason`.
     """
     updated = 0
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT i.id, i.opened_at, i.category, i.urgency, i.status
             FROM incidents i
-            WHERE i.status NOT IN ('resuelto', 'escalado')
+            WHERE i.status NOT IN ('resuelto', 'escalado', 'no_resuelto_eod')
               AND i.closed_at IS NULL
               AND i.opened_at < %s
-              AND (i.sonnet_checked_at IS NULL OR i.sonnet_checked_at < NOW() - INTERVAL '3 hours')
+              AND (i.sonnet_checked_at IS NULL
+                   OR i.sonnet_checked_at < NOW() - INTERVAL '{SONNET_COOLDOWN_HOURS} hours')
             ORDER BY i.opened_at ASC
-            LIMIT 15
+            LIMIT {SONNET_BATCH_SIZE}
             """,
             (cutoff,),
         )
@@ -496,7 +532,6 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     for ticket in tickets:
         incident_id = ticket["id"]
         try:
-            # Fetch last 20 messages for more context
             with connect() as conn2, conn2.cursor() as cur2:
                 cur2.execute(
                     """
@@ -505,7 +540,7 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
                     JOIN messages m ON m.id = a.message_id
                     WHERE a.incident_id = %s AND m.content IS NOT NULL
                     ORDER BY m.timestamp DESC
-                    LIMIT 20
+                    LIMIT 25
                     """,
                     (incident_id,),
                 )
@@ -514,28 +549,40 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
             if not msgs:
                 continue
 
-            is_resolved = ask_is_resolved(msgs, ticket["category"])
+            verdict = ask_is_resolved(msgs, ticket["category"])
 
-            # Update sonnet_checked_at regardless of result
             with connect() as conn3, conn3.cursor() as cur3:
                 cur3.execute(
                     "UPDATE incidents SET sonnet_checked_at = NOW() WHERE id = %s",
                     (incident_id,),
                 )
-                if is_resolved:
+                # Only act on confident verdicts. Low confidence stays open and
+                # gets a fresh check after cooldown.
+                if verdict["resolved"] and verdict["confidence"] in ("alta", "media"):
                     cur3.execute(
                         """
                         UPDATE incidents
-                        SET status = 'resuelto', closed_at = NOW(),
-                            resolution_at = NOW(), updated_at = NOW()
+                        SET status            = 'resuelto',
+                            closed_at         = NOW(),
+                            resolution_at     = NOW(),
+                            resolution_source = 'sonnet_thread',
+                            resolution_reason = %s,
+                            updated_at        = NOW()
                         WHERE id = %s
                         """,
-                        (incident_id,),
+                        (verdict["reason"], incident_id),
                     )
-                    _log_status_change(cur3, incident_id, ticket.get("status", "pendiente"),
-                                       "resuelto", "Sonnet determinó resolución implícita", "auto")
+                    _log_status_change(
+                        cur3, incident_id, ticket.get("status", "pendiente"),
+                        "resuelto",
+                        f"Sonnet ({verdict['confidence']}): {verdict['reason'][:140]}",
+                        "auto",
+                    )
                     updated += 1
-                    log.info("ticket_resolved_sonnet", incident_id=incident_id)
+                    log.info("ticket_resolved_sonnet",
+                             incident_id=incident_id,
+                             confidence=verdict["confidence"],
+                             reason=verdict["reason"][:80])
                 conn3.commit()
 
         except Exception as e:

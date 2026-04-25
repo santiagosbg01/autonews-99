@@ -194,7 +194,7 @@ export type Participant = {
   last_seen_at: string
 }
 
-export type TicketStatus = 'abierto' | 'respondido' | 'resuelto' | 'escalado' | 'pendiente'
+export type TicketStatus = 'abierto' | 'respondido' | 'resuelto' | 'escalado' | 'pendiente' | 'no_resuelto_eod'
 
 export type IncidentRow = {
   id: number
@@ -214,6 +214,8 @@ export type IncidentRow = {
   sentiment_avg: number | null
   escalated_at: string | null
   escalated_reason: string | null
+  resolution_source: string | null
+  resolution_reason: string | null
 }
 
 export type TicketRow = IncidentRow & {
@@ -229,11 +231,22 @@ export type TicketRow = IncidentRow & {
 }
 
 export const TICKET_STATUS_META: Record<string, { label: string; color: string; bg: string; dot: string }> = {
-  abierto:    { label: 'Abierto',    color: '#f59e0b', bg: '#fffbeb', dot: '●' },
-  respondido: { label: 'Respondido', color: '#3b82f6', bg: '#eff6ff', dot: '●' },
-  pendiente:  { label: 'Pendiente',  color: '#f97316', bg: '#fff7ed', dot: '◌' },
-  escalado:   { label: 'Escalado',   color: '#ef4444', bg: '#fef2f2', dot: '▲' },
-  resuelto:   { label: 'Resuelto',   color: '#10b981', bg: '#f0fdf4', dot: '✓' },
+  abierto:         { label: 'Abierto',         color: '#f59e0b', bg: '#fffbeb', dot: '●' },
+  respondido:      { label: 'Respondido',      color: '#3b82f6', bg: '#eff6ff', dot: '●' },
+  pendiente:       { label: 'Pendiente',       color: '#f97316', bg: '#fff7ed', dot: '◌' },
+  escalado:        { label: 'Escalado',        color: '#ef4444', bg: '#fef2f2', dot: '▲' },
+  resuelto:        { label: 'Resuelto',        color: '#10b981', bg: '#f0fdf4', dot: '✓' },
+  no_resuelto_eod: { label: 'No resuelto EOD', color: '#b91c1c', bg: '#fef2f2', dot: '⊘' },
+}
+
+export const RESOLUTION_SOURCE_META: Record<string, { label: string; emoji: string; color: string }> = {
+  agent_signal:    { label: 'Cerrado por agente',          emoji: '👤', color: '#16a34a' },
+  customer_signal: { label: 'Confirmado por cliente',      emoji: '✅', color: '#16a34a' },
+  inactivity:      { label: 'Cerrado por inactividad',     emoji: '⏱',  color: '#0ea5e9' },
+  sonnet_thread:   { label: 'Resolución detectada por IA', emoji: '🤖', color: '#7c3aed' },
+  eod_resolved:    { label: 'Resuelto al cierre del día',  emoji: '🌙', color: '#7c3aed' },
+  eod_unresolved:  { label: 'Sin resolución al EOD',       emoji: '🌙', color: '#b91c1c' },
+  manual:          { label: 'Cerrado manualmente',         emoji: '✏️', color: '#475569' },
 }
 
 export const CATEGORY_ES: Record<string, string> = {
@@ -515,7 +528,7 @@ export async function getGroupParticipants(groupId: number): Promise<Participant
   return data ?? []
 }
 
-const INCIDENT_FIELDS = 'id, opened_at, closed_at, category, urgency, is_open, status, message_count, ttfr_seconds, ttr_seconds, owner_phone, summary, first_response_at, first_response_by, sentiment_avg, escalated_at, escalated_reason'
+const INCIDENT_FIELDS = 'id, opened_at, closed_at, category, urgency, is_open, status, message_count, ttfr_seconds, ttr_seconds, owner_phone, summary, first_response_at, first_response_by, sentiment_avg, escalated_at, escalated_reason, resolution_source, resolution_reason'
 
 export async function getGroupIncidents(groupId: number, limit = 30): Promise<IncidentRow[]> {
   const { data, error } = await supabaseAdmin
@@ -1377,6 +1390,9 @@ export type GlobalKPIs = {
   avg_sentiment_010: number | null   // 0–10 scale
   avg_ttfr_minutes: number | null    // first-response time
   avg_ttr_minutes:  number | null    // total resolution time
+  // % de incidencias abiertas en el rango que se cerraron como 'resuelto'
+  // dentro del MISMO día calendario (en la TZ del grupo). Excluye no_resuelto_eod.
+  same_day_resolution_pct: number | null  // 0..100
   range_label: string
 }
 
@@ -1393,8 +1409,10 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
   if (t) msgQ = msgQ.lte('timestamp', t.toISOString())
   const { count: msgCount } = await msgQ
 
-  // 3. Incidents opened in range
-  let incQ = supabaseAdmin.from('incidents').select('id, ttfr_seconds, ttr_seconds', { count: 'exact' })
+  // 3. Incidents opened in range — also pull fields needed for same-day-resolution KPI
+  let incQ = supabaseAdmin
+    .from('incidents')
+    .select('id, ttfr_seconds, ttr_seconds, opened_at, closed_at, status, timezone', { count: 'exact' })
   if (f) incQ = incQ.gte('opened_at', f.toISOString())
   if (t) incQ = incQ.lte('opened_at', t.toISOString())
   const { data: incData, count: incCount } = await incQ
@@ -1408,6 +1426,11 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
   const avgTtr = ttrs.length > 0
     ? Math.round(ttrs.reduce((a, b) => a + b, 0) / ttrs.length / 60)
     : null
+
+  // 4b. Same-day resolution % — incidents whose opened_at and closed_at fall on
+  //     the SAME calendar day in the group's tz, AND ended in 'resuelto'.
+  //     Denominator: all incidents in range (any final state).
+  const sameDayPct = computeSameDayResolutionPct(incData ?? [])
 
   // 5. Avg client sentiment in range (from analysis, only cliente/otro roles)
   let sentQ = supabaseAdmin
@@ -1434,13 +1457,83 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
   }
 
   return {
-    total_groups:       groupCount ?? 0,
-    messages_in_range:  msgCount   ?? 0,
-    incidents_in_range: incCount   ?? 0,
-    avg_sentiment_010:  avgSentiment010,
-    avg_ttfr_minutes:   avgTtfr,
-    avg_ttr_minutes:    avgTtr,
-    range_label:        rangeLabels[range] ?? range,
+    total_groups:            groupCount ?? 0,
+    messages_in_range:       msgCount   ?? 0,
+    incidents_in_range:      incCount   ?? 0,
+    avg_sentiment_010:       avgSentiment010,
+    avg_ttfr_minutes:        avgTtfr,
+    avg_ttr_minutes:         avgTtr,
+    same_day_resolution_pct: sameDayPct,
+    range_label:             rangeLabels[range] ?? range,
+  }
+}
+
+// Returns the % of incidents opened in [from..to] (or all-time if both null)
+// that closed as 'resuelto' on the same calendar day in their group's tz.
+// Optionally filtered by groupId.
+export async function getSameDayResolutionPct(
+  from: string | null,
+  to: string | null,
+  groupId: number | null,
+): Promise<{ pct: number | null; resolved_same_day: number; total: number; unresolved_eod: number }> {
+  let q = supabaseAdmin
+    .from('incidents')
+    .select('group_id, opened_at, closed_at, status, timezone')
+  if (from)    q = q.gte('opened_at', from)
+  if (to)      q = q.lte('opened_at', to)
+  if (groupId) q = q.eq('group_id', groupId)
+  const { data } = await q
+  const rows = data ?? []
+  const pct = computeSameDayResolutionPct(rows)
+  let resolvedSameDay = 0
+  let unresolvedEod   = 0
+  for (const r of rows) {
+    if (r.status === 'no_resuelto_eod') unresolvedEod++
+    if (r.status === 'resuelto' && r.closed_at && r.opened_at) {
+      const tz = r.timezone || 'UTC'
+      if (formatYmdInTz(r.opened_at, tz) === formatYmdInTz(r.closed_at, tz)) resolvedSameDay++
+    }
+  }
+  return { pct, resolved_same_day: resolvedSameDay, total: rows.length, unresolved_eod: unresolvedEod }
+}
+
+// ---------------------------------------------------------------------------
+// Same-day resolution helper
+// ---------------------------------------------------------------------------
+// Given a list of incident rows containing { opened_at, closed_at, status, timezone }
+// returns the % (0..100) that were closed as 'resuelto' on the SAME calendar day
+// in the incident's group timezone. Returns null when there are no incidents.
+function computeSameDayResolutionPct(rows: any[]): number | null {
+  if (!rows || rows.length === 0) return null
+  let denom = 0
+  let sameDayResolved = 0
+  for (const r of rows) {
+    if (!r.opened_at) continue
+    denom++
+    if (r.status !== 'resuelto' || !r.closed_at) continue
+    const tz = r.timezone || 'UTC'
+    const opened = formatYmdInTz(r.opened_at, tz)
+    const closed = formatYmdInTz(r.closed_at, tz)
+    if (opened && closed && opened === closed) sameDayResolved++
+  }
+  if (denom === 0) return null
+  return Math.round((sameDayResolved / denom) * 1000) / 10  // 1 decimal
+}
+
+// Format an ISO timestamp as YYYY-MM-DD in a given IANA timezone.
+// Uses Intl.DateTimeFormat which is supported on Node 18+ in Vercel/Railway.
+function formatYmdInTz(iso: string, tz: string): string | null {
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return null
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    })
+    return fmt.format(d)  // 'en-CA' yields YYYY-MM-DD
+  } catch {
+    // Fallback: UTC date portion of the ISO string.
+    return iso.slice(0, 10) || null
   }
 }
 
@@ -1481,6 +1574,7 @@ export type GroupScorecard = {
   avg_ttfr_minutes: number | null
   avg_ttr_minutes: number | null   // time to resolution
   resolution_rate: number | null // 0-100
+  same_day_resolution_pct: number | null  // 0-100, % de incidencias resueltas el mismo día
   sla_pct: number | null         // % responded within 15 min
   risk: 'high' | 'medium' | 'low'
 }
@@ -1765,6 +1859,21 @@ export async function getGroupScorecard(
     openByGroup.set(inc.group_id, (openByGroup.get(inc.group_id) ?? 0) + 1)
   }
 
+  // Same-day resolution % per group: pull incidents in range with status + timezone
+  // and count how many were closed on the same calendar day they were opened.
+  let sdQ = supabaseAdmin
+    .from('incidents')
+    .select('group_id, opened_at, closed_at, status, timezone')
+  if (from) sdQ = sdQ.gte('opened_at', from)
+  if (to)   sdQ = sdQ.lte('opened_at', to)
+  const { data: sdRows } = await sdQ
+  const sdByGroup = new Map<number, any[]>()
+  for (const r of (sdRows ?? [])) {
+    const arr = sdByGroup.get(r.group_id) ?? []
+    arr.push(r)
+    sdByGroup.set(r.group_id, arr)
+  }
+
   const result: GroupScorecard[] = []
   for (const [gid, rows] of byGroup.entries()) {
     const meta = groupMap.get(gid)
@@ -1791,6 +1900,8 @@ export async function getGroupScorecard(
           ? 'medium'
           : 'low'
 
+    const sameDayPct = computeSameDayResolutionPct(sdByGroup.get(gid) ?? [])
+
     result.push({
       id: gid,
       name: meta.name,
@@ -1803,6 +1914,7 @@ export async function getGroupScorecard(
       avg_ttfr_minutes: ttfrMin,
       avg_ttr_minutes: ttrMin,
       resolution_rate: resoRate,
+      same_day_resolution_pct: sameDayPct,
       sla_pct: null, // would need detailed TTFR breakdown
       risk,
     })

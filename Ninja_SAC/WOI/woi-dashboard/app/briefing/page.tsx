@@ -93,6 +93,64 @@ export default async function BriefingHubPage({
         </p>
       </div>
 
+      {/* What is this — explainer block */}
+      <div style={{
+        background: 'linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%)',
+        border: '1px solid #bbf7d0',
+        borderRadius: 14,
+        padding: '18px 22px',
+        marginBottom: 22,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: 10, fontWeight: 700, color: '#16a34a',
+            background: '#dcfce7', padding: '3px 10px', borderRadius: 999, letterSpacing: '0.06em',
+          }}>
+            QUÉ ES ESTO
+          </span>
+          <span style={{ fontSize: 13, color: '#0f172a', fontWeight: 600 }}>
+            Reporte ejecutivo automático · 1 página por cliente · listo a las 6 am
+          </span>
+        </div>
+        <p style={{ fontSize: 13, color: '#334155', margin: '0 0 12px', lineHeight: 1.55 }}>
+          Cada noche Sonnet (Claude) lee toda la actividad de WhatsApp del día anterior de cada grupo y, a las
+          {' '}<strong>06:00 hora local del país del cliente</strong>, deja listo un resumen narrativo accionable.
+          Cuando un account manager o supervisor llega a la oficina, en 90 segundos sabe qué clientes llamar,
+          qué incidencias dieron seguimiento y qué grupos están en riesgo de churn — sin abrir un solo chat de WhatsApp.
+        </p>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+          gap: 10,
+          marginTop: 6,
+        }}>
+          {[
+            { title: 'Headline + Highlights', desc: 'Resumen del día y 5 eventos críticos del cliente' },
+            { title: 'Tendencia 7d / 30d',   desc: 'Compara con la semana y mes anteriores' },
+            { title: 'Churn signals',         desc: 'Frases textuales del cliente con tono de salida' },
+            { title: 'Agentes en zona roja',  desc: 'Quién pasó del SLA de TTFR (>30 min)' },
+          ].map(card => (
+            <div key={card.title} style={{
+              background: '#fff',
+              border: '1px solid #d1fae5',
+              borderRadius: 10,
+              padding: '10px 12px',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#065f46', marginBottom: 2 }}>
+                {card.title}
+              </div>
+              <div style={{ fontSize: 11, color: '#475569', lineHeight: 1.4 }}>
+                {card.desc}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: '#64748b', marginTop: 12, fontStyle: 'italic' }}>
+          ¿Para quién? Account managers (llamada matutina con el cliente), supervisores de ops (qué grupos vigilar hoy)
+          y dirección (snapshot de operaciones sin entrar a cada chat).
+        </div>
+      </div>
+
       {/* Summary banner */}
       <div style={{
         display: 'grid',

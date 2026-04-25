@@ -25,6 +25,7 @@ from woi_analyzer.churn_detector import scan_recent_messages as scan_churn_signa
 from woi_analyzer.classifier import run_classification_batch
 from woi_analyzer.config import CONFIG
 from woi_analyzer.daily_batch import run_daily_batch
+from woi_analyzer.eod_resolver import run_due_eod_resolution
 from woi_analyzer.group_analyst import run_group_analysis_batch
 from woi_analyzer.incident_reconstructor import reconstruct_recent_incidents, refresh_open_ticket_statuses
 from woi_analyzer.logging_setup import log
@@ -35,6 +36,7 @@ WORK_HOUR_START = 6   # 06:00 CDMX inclusive (window where we still classify)
 WORK_HOUR_END   = 22  # 22:00 CDMX inclusive (window where we still classify)
 DAILY_HOUR      = 22  # hora en que además corre el daily batch
 BRIEFING_HOUR   = 6   # hora local de cada grupo en la que se dispara su briefing
+EOD_HOUR        = 23  # hora local de cada grupo en la que se cierran tickets abiertos
 
 
 def _cdmx_hour() -> int:
@@ -95,6 +97,22 @@ def _run_hourly_cycle() -> None:
             )
     except Exception as e:
         log.error("morning_briefing_error", error=str(e))
+
+    # 4.5 End-of-day resolution sweep — runs per-group at 23:xx local time.
+    #     Forces a verdict (resuelto / no_resuelto_eod) on every still-open
+    #     ticket so we don't carry unresolved complaints into the next day.
+    try:
+        eod_results = run_due_eod_resolution(eod_hour=EOD_HOUR)
+        if eod_results:
+            log.info(
+                "eod_resolution_batch_done",
+                groups=len(eod_results),
+                total_open=sum(r.get("open_at_eod", 0) for r in eod_results),
+                resolved=sum(r.get("resolved", 0) for r in eod_results),
+                unresolved=sum(r.get("unresolved", 0) for r in eod_results),
+            )
+    except Exception as e:
+        log.error("eod_resolution_error", error=str(e))
 
     # 5. Daily batch at DAILY_HOUR
     if _cdmx_hour() == DAILY_HOUR:

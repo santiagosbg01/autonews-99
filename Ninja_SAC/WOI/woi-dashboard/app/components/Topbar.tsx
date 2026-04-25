@@ -9,7 +9,7 @@ export default function Topbar() {
     }}>
       <div style={{ maxWidth: 1280, margin: '0 auto', padding: '0 24px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <a href="/" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}>
+          <a href="/analytics" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}>
             <img
               src="/ninja-ops-monitor.jpg"
               alt="Ninja Ops Monitor"
@@ -30,7 +30,15 @@ export default function Topbar() {
           <div style={{ width: 1, height: 24, background: 'var(--border)', margin: '0 4px' }} />
 
           <div style={{ display: 'flex', gap: 2 }}>
-            {[{ href: '/briefing', label: 'Briefing' }, { href: '/', label: 'Grupos' }, { href: '/tickets', label: 'Tickets' }, { href: '/agentes', label: 'Agentes' }, { href: '/churn', label: 'Churn' }, { href: '/analytics', label: 'Analytics' }, { href: '/voc', label: 'VoC' }].map(link => (
+            {[
+              { href: '/analytics', label: 'Analytics' },
+              { href: '/grupos',    label: 'Grupos'    },
+              { href: '/tickets',   label: 'Tickets'   },
+              { href: '/briefing',  label: 'Briefing'  },
+              { href: '/agentes',   label: 'Agentes'   },
+              { href: '/churn',     label: 'Churn'     },
+              { href: '/voc',       label: 'VoC'       },
+            ].map(link => (
               <a key={link.href} href={link.href} style={{
                 fontSize: 13, fontWeight: 500, color: 'var(--text-sub)',
                 textDecoration: 'none', padding: '5px 10px', borderRadius: 6,

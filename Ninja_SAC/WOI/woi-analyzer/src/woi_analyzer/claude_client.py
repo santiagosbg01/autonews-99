@@ -394,11 +394,38 @@ def generate_group_analysis(
 # ---------------------------------------------------------------------------
 # Resolution check (Sonnet) — is this incident thread resolved?
 # ---------------------------------------------------------------------------
-def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
+def ask_is_resolved(
+    messages: list[dict],
+    category: str | None,
+    *,
+    eod_mode: bool = False,
+) -> dict:
     """
     Pregunta a Sonnet si el hilo de mensajes indica que el incidente fue resuelto.
-    Retorna True si Sonnet determina que sí fue resuelto.
-    Respuesta esperada: JSON {"resolved": true|false, "reason": "..."}
+
+    El razonamiento sigue 3 pasos explícitos:
+      1. ¿Cuál fue la queja/problema original del CLIENTE?
+      2. ¿El equipo 99 respondió? ¿Qué hicieron?
+      3. ¿Hay evidencia en los mensajes posteriores de que el problema
+         se atendió/resolvió (la unidad llegó, el cliente dejó de quejarse,
+         se confirmó la entrega, etc.)?
+
+    Args:
+        messages: lista cronológica con sender_role, sender_display_name,
+                  content, timestamp, category.
+        category: categoría dominante del incidente (orienta a Sonnet).
+        eod_mode: si True, usa el prompt de "fin del día" — más estricto,
+                  diseñado para forzar un veredicto final cuando el día
+                  cierra sin resolución clara.
+
+    Returns:
+        dict con shape:
+          {
+            "resolved": bool,
+            "reason":   str,            # 1 frase ≤200 chars
+            "confidence": "alta"|"media"|"baja",
+          }
+        Si la llamada a Sonnet falla, retorna {"resolved": False, "reason": "", "confidence": "baja"}.
     """
     lines = []
     for m in messages:
@@ -408,33 +435,72 @@ def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
         cat = m.get("category") or ""
         ts = str(m.get("timestamp", ""))[:16]
         lines.append(f"[{ts}] [{role}]{f' {name}' if name else ''} ({cat}): {content}")
-
     thread = "\n".join(lines)
-    system = (
-        "Eres un experto en operaciones logísticas de última milla. "
-        "Tu tarea es determinar si un incidente operativo fue RESUELTO basándote en el hilo de mensajes.\n\n"
-        "SEÑALES CLARAS DE RESOLUCIÓN (cualquiera implica resuelto=true):\n"
-        "- La unidad descargó, se retiró, salió o completó su tarea\n"
-        "- Se confirmó la entrega o recolección exitosa\n"
-        "- Se envió evidencia fotográfica de completado\n"
-        "- Alguien confirmó explícitamente que el problema se resolvió\n"
-        "- El hilo termina en silencio después de una respuesta del agente y no hay mensajes de queja\n\n"
-        "SEÑALES DE NO RESOLUCIÓN:\n"
-        "- El problema sigue activo sin respuesta final\n"
-        "- Hay mensajes recientes de queja o escalamiento\n"
-        "- El agente prometió resolver pero no hay confirmación de cierre\n\n"
-        "Responde SOLO con JSON: {\"resolved\": true|false, \"reason\": \"una frase\"}"
+
+    system_base = (
+        "Eres un analista de operaciones logísticas de última milla.\n"
+        "Tu tarea es decidir si un incidente operativo está RESUELTO leyendo el hilo "
+        "completo de WhatsApp del grupo (cliente + agentes 99).\n\n"
+        "PROCEDE EN 3 PASOS:\n"
+        "  1. Identifica la QUEJA/PROBLEMA ORIGINAL del cliente — ¿qué pidió o de qué se quejó?\n"
+        "     (Ej: 'la unidad no ha llegado', '¿dónde está el conductor?', "
+        "      'tengo un retraso de 2 horas', 'falta evidencia de entrega'.)\n"
+        "  2. Identifica las RESPUESTAS del equipo 99 y CUALQUIER MENSAJE POSTERIOR del cliente.\n"
+        "  3. Decide: ¿el problema original quedó atendido? Mira evidencia EXPLÍCITA o IMPLÍCITA.\n\n"
+
+        "EVIDENCIA EXPLÍCITA de resolución (resuelto=true, confidence=alta):\n"
+        "- La unidad llegó / descargó / salió tras la queja del cliente\n"
+        "- Se compartió evidencia (foto, video, comprobante) que cierra el caso\n"
+        "- Cliente o agente confirmó verbalmente: 'ya llegó', 'gracias, listo', 'ya se resolvió'\n"
+        "- Se reportó la entrega/recolección como completada después del problema\n\n"
+
+        "EVIDENCIA IMPLÍCITA de resolución (resuelto=true, confidence=media):\n"
+        "- El cliente cambió de tono de molesto a neutro/positivo después de la respuesta del agente\n"
+        "- El último mensaje del cliente fue 'ok', 'gracias', emojis positivos, o equivalente\n"
+        "- El hilo siguió con conversación normal del día sin retomar la queja\n"
+        "- El agente confirmó acción concreta y el cliente no volvió a reclamar el mismo punto\n\n"
+
+        "SEÑALES DE NO RESOLUCIÓN (resuelto=false):\n"
+        "- El cliente sigue insistiendo en lo mismo en mensajes recientes\n"
+        "- Hay escalamiento ('ya van varias veces', 'voy a hablar con tu jefe')\n"
+        "- El agente prometió '¿ahorita reviso?' pero nunca volvió con conclusión\n"
+        "- La queja era específica (ej: 'la unidad no ha llegado') y el hilo no muestra "
+        "  que efectivamente llegó\n"
+        "- Silencio sin respuesta final del agente cuando había pregunta abierta del cliente\n\n"
+
+        "REGLAS DE FORMATO:\n"
+        "- Responde SOLO con JSON válido. Sin markdown, sin texto extra.\n"
+        "- 'reason' debe explicar AMBAS cosas en 1 frase (≤200 chars):\n"
+        "    qué pidió el cliente Y por qué consideras resuelto/no resuelto.\n"
+        "    Ejemplo: 'Cliente reportó retraso de la unidad 1234; agente confirmó llegada y descarga 40 min después.'\n"
+        "    Ejemplo: 'Cliente preguntó por la unidad faltante; agente prometió revisar pero no hubo confirmación posterior.'\n"
+        "- 'confidence': alta (evidencia explícita), media (evidencia implícita), baja (inferencia frágil).\n"
+        "Schema: {\"resolved\": true|false, \"reason\": \"...\", \"confidence\": \"alta|media|baja\"}"
     )
+
+    if eod_mode:
+        system = system_base + (
+            "\n\nMODO FIN DE DÍA (EOD):\n"
+            "Estamos cerrando el día operativo. Este ticket NO se cerró por sí solo. "
+            "Necesitas un veredicto final.\n"
+            "- Si hay evidencia explícita o implícita razonable de resolución → resuelto=true.\n"
+            "- Si la queja original quedó SIN atender o sin confirmación clara → resuelto=false. "
+            "  Esto NO es error del análisis: significa que operacionalmente quedó pendiente "
+            "  y debe contar como 'no resuelto el mismo día'."
+        )
+    else:
+        system = system_base
+
     prompt = (
-        f"Categoría del incidente: {category or 'desconocida'}\n\n"
-        f"Hilo de mensajes ({len(lines)} mensajes, cronológico):\n{thread}\n\n"
-        "¿Fue resuelto este incidente?"
+        f"Categoría del incidente (clasificación inicial): {category or 'desconocida'}\n\n"
+        f"Hilo cronológico ({len(lines)} mensajes):\n{thread}\n\n"
+        f"{'¿Quedó resuelto este incidente al cierre del día?' if eod_mode else '¿Fue resuelto este incidente?'}"
     )
 
     try:
         response = get_client().messages.create(
-            model=CONFIG.anthropic.sonnet_model,  # Sonnet para mejor precisión
-            max_tokens=120,
+            model=CONFIG.anthropic.sonnet_model,
+            max_tokens=200,
             system=system,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -443,12 +509,21 @@ def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
         ).strip()
         data = _extract_json(text)
         resolved = bool(data.get("resolved", False))
-        if resolved:
-            log.info("sonnet_resolution_detected", reason=data.get("reason", ""))
-        return resolved
+        reason = str(data.get("reason", "") or "")[:200]
+        confidence = str(data.get("confidence", "media") or "media").lower()
+        if confidence not in ("alta", "media", "baja"):
+            confidence = "media"
+        log.info(
+            "sonnet_resolution_check",
+            resolved=resolved,
+            confidence=confidence,
+            eod_mode=eod_mode,
+            reason=reason[:120],
+        )
+        return {"resolved": resolved, "reason": reason, "confidence": confidence}
     except Exception as e:
         log.warning("ask_is_resolved_failed", error=str(e))
-        return False
+        return {"resolved": False, "reason": "", "confidence": "baja"}
 
 
 # ---------------------------------------------------------------------------
