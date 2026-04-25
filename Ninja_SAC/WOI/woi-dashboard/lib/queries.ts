@@ -16,6 +16,7 @@ export type GroupSummary = {
   bucket_b_today: number
   avg_sentiment: number | null
   avg_ttfr_minutes: number | null
+  avg_ttr_minutes: number | null
   last_message_at: string | null
   // Health score (last-7-days window)
   incidents_total_7d: number
@@ -317,9 +318,9 @@ export async function getGroupsSummary(): Promise<GroupSummary[]> {
           .not('analysis', 'is', null),
         supabaseAdmin.from('messages').select('timestamp')
           .eq('group_id', g.id).order('timestamp', { ascending: false }).limit(1),
-        // Pull all 7d incidents once → derive total/resolved/escalated/ttfr in JS
+        // Pull all 7d incidents once → derive total/resolved/escalated/ttfr/ttr in JS
         supabaseAdmin.from('incidents')
-          .select('ttfr_seconds, closed_at, escalated_at')
+          .select('ttfr_seconds, ttr_seconds, closed_at, escalated_at')
           .eq('group_id', g.id)
           .gte('opened_at', startOfWeek.toISOString()),
       ])
@@ -350,6 +351,11 @@ export async function getGroupsSummary(): Promise<GroupSummary[]> {
       const avg_ttfr_minutes = ttfrs.length > 0
         ? Math.round(ttfrs.reduce((a: number, b: number) => a + b, 0) / ttfrs.length / 60)
         : null
+      // TTR = total time-to-resolution (only counts closed incidents)
+      const ttrs = incidents.map((i: any) => i.ttr_seconds).filter((s: any) => s !== null)
+      const avg_ttr_minutes = ttrs.length > 0
+        ? Math.round(ttrs.reduce((a: number, b: number) => a + b, 0) / ttrs.length / 60)
+        : null
 
       const health = computeHealthScore({
         avg_sentiment,
@@ -367,6 +373,7 @@ export async function getGroupsSummary(): Promise<GroupSummary[]> {
         bucket_b_today,
         avg_sentiment,
         avg_ttfr_minutes,
+        avg_ttr_minutes,
         last_message_at: lastMsg?.[0]?.timestamp ?? null,
         incidents_total_7d,
         incidents_resolved_7d,
@@ -1275,6 +1282,8 @@ export type CategoryBreakdownItem = {
   urgency_media: number
   urgency_baja: number
   avg_ttfr_min: number | null
+  avg_ttr_min:  number | null   // time to resolution
+  resolved:     number          // # closed in window
 }
 
 export async function getIncidentCategoryBreakdown(days = 30): Promise<CategoryBreakdownItem[]> {
@@ -1283,22 +1292,27 @@ export async function getIncidentCategoryBreakdown(days = 30): Promise<CategoryB
 
   const { data, error } = await supabaseAdmin
     .from('incidents')
-    .select('category, urgency, ttfr_seconds')
+    .select('category, urgency, ttfr_seconds, ttr_seconds, closed_at')
     .gte('opened_at', since.toISOString())
     .not('category', 'is', null)
 
   if (error || !data) return []
 
-  const map: Record<string, { count: number; alta: number; media: number; baja: number; ttfrs: number[] }> = {}
+  const map: Record<string, {
+    count: number; alta: number; media: number; baja: number;
+    ttfrs: number[]; ttrs: number[]; closed: number;
+  }> = {}
 
   for (const row of data as any[]) {
     const cat = row.category as string
-    if (!map[cat]) map[cat] = { count: 0, alta: 0, media: 0, baja: 0, ttfrs: [] }
+    if (!map[cat]) map[cat] = { count: 0, alta: 0, media: 0, baja: 0, ttfrs: [], ttrs: [], closed: 0 }
     map[cat].count++
     if (row.urgency === 'alta')  map[cat].alta++
     if (row.urgency === 'media') map[cat].media++
     if (row.urgency === 'baja')  map[cat].baja++
     if (row.ttfr_seconds != null) map[cat].ttfrs.push(row.ttfr_seconds)
+    if (row.ttr_seconds  != null) map[cat].ttrs.push(row.ttr_seconds)
+    if (row.closed_at) map[cat].closed++
   }
 
   const total = Object.values(map).reduce((s, v) => s + v.count, 0)
@@ -1316,6 +1330,10 @@ export async function getIncidentCategoryBreakdown(days = 30): Promise<CategoryB
       avg_ttfr_min:  v.ttfrs.length > 0
         ? Math.round(v.ttfrs.reduce((a, b) => a + b, 0) / v.ttfrs.length / 60)
         : null,
+      avg_ttr_min:   v.ttrs.length > 0
+        ? Math.round(v.ttrs.reduce((a, b) => a + b, 0) / v.ttrs.length / 60)
+        : null,
+      resolved:      v.closed,
     }))
     .sort((a, b) => b.count - a.count)
 }
@@ -1357,7 +1375,8 @@ export type GlobalKPIs = {
   messages_in_range: number
   incidents_in_range: number
   avg_sentiment_010: number | null   // 0–10 scale
-  avg_ttfr_minutes: number | null
+  avg_ttfr_minutes: number | null    // first-response time
+  avg_ttr_minutes:  number | null    // total resolution time
   range_label: string
 }
 
@@ -1375,15 +1394,19 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
   const { count: msgCount } = await msgQ
 
   // 3. Incidents opened in range
-  let incQ = supabaseAdmin.from('incidents').select('id, ttfr_seconds', { count: 'exact' })
+  let incQ = supabaseAdmin.from('incidents').select('id, ttfr_seconds, ttr_seconds', { count: 'exact' })
   if (f) incQ = incQ.gte('opened_at', f.toISOString())
   if (t) incQ = incQ.lte('opened_at', t.toISOString())
   const { data: incData, count: incCount } = await incQ
 
-  // 4. Avg TTFR from incidents in range
+  // 4. Avg TTFR (first-response) and TTR (resolution) from incidents in range
   const ttfrs = (incData ?? []).map((r: any) => r.ttfr_seconds).filter((v: any) => v != null) as number[]
+  const ttrs  = (incData ?? []).map((r: any) => r.ttr_seconds).filter((v: any) => v != null) as number[]
   const avgTtfr = ttfrs.length > 0
     ? Math.round(ttfrs.reduce((a, b) => a + b, 0) / ttfrs.length / 60)
+    : null
+  const avgTtr = ttrs.length > 0
+    ? Math.round(ttrs.reduce((a, b) => a + b, 0) / ttrs.length / 60)
     : null
 
   // 5. Avg client sentiment in range (from analysis, only cliente/otro roles)
@@ -1416,6 +1439,7 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
     incidents_in_range: incCount   ?? 0,
     avg_sentiment_010:  avgSentiment010,
     avg_ttfr_minutes:   avgTtfr,
+    avg_ttr_minutes:    avgTtr,
     range_label:        rangeLabels[range] ?? range,
   }
 }
@@ -1440,7 +1464,8 @@ export type TimeSeriesPoint = {
   messages: number
   incidents: number
   sentiment: number | null  // 0-10 scale
-  ttfr_minutes: number | null
+  ttfr_minutes: number | null  // Time to first response (substantive)
+  ttr_minutes: number | null   // Time to resolution (full ticket lifecycle)
   resolution_rate: number | null  // 0-100
 }
 
@@ -1454,6 +1479,7 @@ export type GroupScorecard = {
   open_incidents: number
   avg_sentiment: number | null   // 0-10
   avg_ttfr_minutes: number | null
+  avg_ttr_minutes: number | null   // time to resolution
   resolution_rate: number | null // 0-100
   sla_pct: number | null         // % responded within 15 min
   risk: 'high' | 'medium' | 'low'
@@ -1468,7 +1494,7 @@ export async function getAnalyticsTimeSeries(
   // This works even before daily_reports is populated.
   let q = supabaseAdmin
     .from('group_kpi_snapshots')
-    .select('snapshot_date, total_messages, incidents_opened, incidents_closed, client_sentiment_avg, avg_ttfr_seconds, group_id')
+    .select('snapshot_date, total_messages, incidents_opened, incidents_closed, client_sentiment_avg, avg_ttfr_seconds, avg_ttr_seconds, group_id')
     .order('snapshot_date', { ascending: true })
 
   if (groupId) q = q.eq('group_id', groupId)
@@ -1481,18 +1507,19 @@ export async function getAnalyticsTimeSeries(
   // Aggregate by date across all groups
   const byDate = new Map<string, {
     messages: number; incidents: number; incidents_closed: number;
-    sentiments: number[]; ttfrs: number[];
+    sentiments: number[]; ttfrs: number[]; ttrs: number[];
   }>()
 
   for (const r of data as any[]) {
     const d = String(r.snapshot_date).slice(0, 10)
-    if (!byDate.has(d)) byDate.set(d, { messages: 0, incidents: 0, incidents_closed: 0, sentiments: [], ttfrs: [] })
+    if (!byDate.has(d)) byDate.set(d, { messages: 0, incidents: 0, incidents_closed: 0, sentiments: [], ttfrs: [], ttrs: [] })
     const e = byDate.get(d)!
     e.messages         += r.total_messages ?? 0
     e.incidents        += r.incidents_opened ?? 0
     e.incidents_closed += r.incidents_closed ?? 0
     if (r.client_sentiment_avg != null) e.sentiments.push(Number(r.client_sentiment_avg))
     if (r.avg_ttfr_seconds != null)     e.ttfrs.push(Number(r.avg_ttfr_seconds))
+    if (r.avg_ttr_seconds  != null)     e.ttrs.push(Number(r.avg_ttr_seconds))
   }
 
   return [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, v]) => {
@@ -1502,6 +1529,9 @@ export async function getAnalyticsTimeSeries(
     const avgTtfr = v.ttfrs.length > 0
       ? v.ttfrs.reduce((a, b) => a + b, 0) / v.ttfrs.length
       : null
+    const avgTtr = v.ttrs.length > 0
+      ? v.ttrs.reduce((a, b) => a + b, 0) / v.ttrs.length
+      : null
     return {
       date,
       messages:  v.messages,
@@ -1510,6 +1540,7 @@ export async function getAnalyticsTimeSeries(
         ? Math.round(((avgSent + 1) / 2) * 100) / 10   // -1..1 → 0..10
         : null,
       ttfr_minutes:    avgTtfr != null ? Math.round(avgTtfr / 60) : null,
+      ttr_minutes:     avgTtr  != null ? Math.round(avgTtr  / 60) : null,
       resolution_rate: v.incidents > 0
         ? Math.round((v.incidents_closed / v.incidents) * 100)
         : null,
@@ -1701,6 +1732,7 @@ export async function getGroupScorecard(
       incidents_closed,
       client_sentiment_avg,
       avg_ttfr_seconds,
+      avg_ttr_seconds,
       snapshot_date
     `)
     .order('snapshot_date', { ascending: false })
@@ -1742,11 +1774,14 @@ export async function getGroupScorecard(
     const totalIncClose = rows.reduce((s: number, r: any) => s + (r.incidents_closed ?? 0), 0)
     const sentVals    = rows.map((r: any) => r.client_sentiment_avg).filter((v: any) => v != null) as number[]
     const ttfrVals    = rows.map((r: any) => r.avg_ttfr_seconds).filter((v: any) => v != null) as number[]
+    const ttrVals     = rows.map((r: any) => r.avg_ttr_seconds).filter((v: any) => v != null) as number[]
     const avgSent     = sentVals.length > 0 ? sentVals.reduce((a, b) => a + b, 0) / sentVals.length : null
     const avgTtfr     = ttfrVals.length > 0 ? ttfrVals.reduce((a, b) => a + b, 0) / ttfrVals.length : null
+    const avgTtr      = ttrVals.length  > 0 ? ttrVals.reduce((a, b) => a + b, 0) / ttrVals.length   : null
     const resoRate    = totalIncOpen > 0 ? Math.round((totalIncClose / totalIncOpen) * 100) : null
     const sent010     = avgSent != null ? Math.round(((avgSent + 1) / 2) * 100) / 10 : null
     const ttfrMin     = avgTtfr != null ? Math.round(avgTtfr / 60) : null
+    const ttrMin      = avgTtr  != null ? Math.round(avgTtr  / 60) : null
 
     // Risk: high if sentiment < 5 OR ttfr > 30 OR resolution < 50%
     const risk: 'high' | 'medium' | 'low' =
@@ -1766,6 +1801,7 @@ export async function getGroupScorecard(
       open_incidents: openByGroup.get(gid) ?? 0,
       avg_sentiment: sent010,
       avg_ttfr_minutes: ttfrMin,
+      avg_ttr_minutes: ttrMin,
       resolution_rate: resoRate,
       sla_pct: null, // would need detailed TTFR breakdown
       risk,
@@ -2456,8 +2492,9 @@ export type WeeklyTrendPoint = {
   bucket_c:          number
   noise_pct:         number | null  // bucket_c / total_messages * 100
   sentiment:         number | null  // 0..10
-  avg_ttfr_minutes:  number | null
+  avg_ttfr_minutes:  number | null  // time to first response
   p90_ttfr_minutes:  number | null
+  avg_ttr_minutes:   number | null  // time to resolution (full ticket lifecycle)
 }
 
 function _isoWeekNum(date: Date): number {
@@ -2515,7 +2552,7 @@ export async function getMultiWeekTrend(
       group_id,
       total_messages, bucket_a, bucket_b, bucket_c,
       incidents_opened, incidents_closed,
-      avg_ttfr_seconds, p90_ttfr_seconds,
+      avg_ttfr_seconds, p90_ttfr_seconds, avg_ttr_seconds,
       client_sentiment_avg
     `)
     .gte('snapshot_date', fromIso)
@@ -2537,6 +2574,7 @@ export async function getMultiWeekTrend(
     incidents_closed: number
     ttfr_avg_sec: number[]   // for averaging
     p90_ttfr_sec: number[]
+    ttr_avg_sec:  number[]
     sentiments:   number[]
   }
   const buckets = new Map<string, Bucket>()
@@ -2549,7 +2587,7 @@ export async function getMultiWeekTrend(
       days: new Set(),
       messages: 0, bucket_a: 0, bucket_b: 0, bucket_c: 0,
       incidents_opened: 0, incidents_closed: 0,
-      ttfr_avg_sec: [], p90_ttfr_sec: [], sentiments: [],
+      ttfr_avg_sec: [], p90_ttfr_sec: [], ttr_avg_sec: [], sentiments: [],
     })
   }
 
@@ -2568,6 +2606,7 @@ export async function getMultiWeekTrend(
     b.incidents_closed += r.incidents_closed  ?? 0
     if (r.avg_ttfr_seconds  != null) b.ttfr_avg_sec.push(Number(r.avg_ttfr_seconds))
     if (r.p90_ttfr_seconds  != null) b.p90_ttfr_sec.push(Number(r.p90_ttfr_seconds))
+    if (r.avg_ttr_seconds   != null) b.ttr_avg_sec.push(Number(r.avg_ttr_seconds))
     if (r.client_sentiment_avg != null) b.sentiments.push(Number(r.client_sentiment_avg))
   }
 
@@ -2578,6 +2617,7 @@ export async function getMultiWeekTrend(
     const sentRaw = avg(b.sentiments)
     const ttfrSec = avg(b.ttfr_avg_sec)
     const p90Sec  = avg(b.p90_ttfr_sec)
+    const ttrSec  = avg(b.ttr_avg_sec)
     return {
       week_start:        b.monday.toISOString().slice(0, 10),
       week_label:        _formatWeekLabel(b.monday),
@@ -2599,6 +2639,7 @@ export async function getMultiWeekTrend(
         : null,
       avg_ttfr_minutes:  ttfrSec != null ? Math.round(ttfrSec / 60) : null,
       p90_ttfr_minutes:  p90Sec  != null ? Math.round(p90Sec  / 60) : null,
+      avg_ttr_minutes:   ttrSec  != null ? Math.round(ttrSec  / 60) : null,
     } satisfies WeeklyTrendPoint
   })
 }

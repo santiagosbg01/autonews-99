@@ -102,9 +102,23 @@ function TtfrBadge({ min }: { min: number | null }) {
   if (min === null) return <span style={{ color: '#94a3b8' }}>—</span>
   const color = min > 30 ? '#ef4444' : min > 15 ? '#f59e0b' : '#10b981'
   const bg    = min > 30 ? '#fef2f2' : min > 15 ? '#fffbeb' : '#f0fdf4'
+  const label = min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`
   return (
-    <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 6, fontSize: 12, fontWeight: 700 }}>
-      {min}m
+    <span title="Tiempo a primera respuesta" style={{ color, background: bg, padding: '2px 8px', borderRadius: 6, fontSize: 12, fontWeight: 700 }}>
+      {label}
+    </span>
+  )
+}
+
+function TtrBadge({ min }: { min: number | null }) {
+  if (min === null) return <span style={{ color: '#94a3b8' }}>—</span>
+  // TTR threshold: ≤90m great · ≤240m attention · >240m critical
+  const color = min > 240 ? '#ef4444' : min > 90 ? '#f59e0b' : '#10b981'
+  const bg    = min > 240 ? '#fef2f2' : min > 90 ? '#fffbeb' : '#f0fdf4'
+  const label = min < 60 ? `${min}m` : `${Math.floor(min / 60)}h ${min % 60}m`
+  return (
+    <span title="Tiempo total a resolución" style={{ color, background: bg, padding: '2px 8px', borderRadius: 6, fontSize: 12, fontWeight: 700 }}>
+      {label}
     </span>
   )
 }
@@ -185,10 +199,18 @@ export default async function AnalyticsPage({
     ? agents.filter(a => a.avg_ttfr_minutes !== null).reduce((s, a) => s + (a.avg_ttfr_minutes ?? 0), 0)
       / (agents.filter(a => a.avg_ttfr_minutes !== null).length || 1)
     : null
+  // Avg TTR over the period (full ticket resolution time)
+  const ttrPts = timeSeries.filter(d => d.ttr_minutes != null)
+  const avgTtr = ttrPts.length > 0
+    ? ttrPts.reduce((s, d) => s + (d.ttr_minutes ?? 0), 0) / ttrPts.length
+    : null
   const slaOk = timeSeries.filter(d => d.ttfr_minutes != null && d.ttfr_minutes <= 15).length
   const slaPct = timeSeries.filter(d => d.ttfr_minutes != null).length > 0
     ? Math.round(slaOk / timeSeries.filter(d => d.ttfr_minutes != null).length * 100)
     : null
+
+  const fmtMin = (v: number | null) =>
+    v == null ? '—' : v < 60 ? `${Math.round(v)}m` : `${Math.floor(v / 60)}h ${Math.round(v) % 60}m`
 
   const periodLabel: Record<string, string> = {
     '7d': 'últimos 7 días', '30d': 'últimos 30 días', '90d': 'últimos 90 días', todos: 'todo el tiempo',
@@ -214,7 +236,7 @@ export default async function AnalyticsPage({
       <AnalyticsCharts data={timeSeries} periodLabel={periodLabel[period] ?? period} />
 
       {/* ── KPI Summary cards — below charts ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 28 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 28 }}>
         {[
           {
             label: 'Incidencias abiertas',
@@ -223,14 +245,25 @@ export default async function AnalyticsPage({
             color: totalOpen > 5 ? '#ef4444' : '#10b981',
             bg: totalOpen > 5 ? '#fef2f2' : '#f0fdf4',
             href: '/tickets?status=abierto',
+            tooltip: 'Tickets actualmente abiertos en todos los grupos.',
           },
           {
             label: 'TTFR global',
-            value: avgTtfr !== null ? `${avgTtfr.toFixed(0)}m` : '—',
-            sub: 'tiempo hasta primera respuesta',
+            value: fmtMin(avgTtfr),
+            sub: 'tiempo a 1ª respuesta',
             color: avgTtfr !== null && avgTtfr > 30 ? '#ef4444' : avgTtfr !== null && avgTtfr > 15 ? '#f59e0b' : '#10b981',
             bg: '#fff',
             href: null,
+            tooltip: 'Promedio de tiempo desde que se abre un ticket hasta la primera respuesta sustantiva del agente 99. SLA: 30 min.',
+          },
+          {
+            label: 'TTR global',
+            value: fmtMin(avgTtr),
+            sub: 'tiempo total a resolución',
+            color: avgTtr !== null && avgTtr > 240 ? '#ef4444' : avgTtr !== null && avgTtr > 90 ? '#f59e0b' : '#10b981',
+            bg: '#fff',
+            href: null,
+            tooltip: 'Promedio del tiempo total desde apertura hasta resolución del ticket. Incluye todo el ciclo de vida.',
           },
           {
             label: 'SLA ≤15 min',
@@ -239,6 +272,7 @@ export default async function AnalyticsPage({
             color: slaPct !== null && slaPct < 60 ? '#ef4444' : slaPct !== null && slaPct < 80 ? '#f59e0b' : '#10b981',
             bg: '#fff',
             href: null,
+            tooltip: 'Porcentaje de días donde el TTFR promedio fue ≤15 min.',
           },
           {
             label: 'Tipos de problema',
@@ -247,6 +281,7 @@ export default async function AnalyticsPage({
             color: '#ef4444',
             bg: '#fef2f2',
             href: null,
+            tooltip: 'Cantidad de incidencias clasificadas como problema (no operativos / no ruido).',
           },
         ].map(c => {
           const cardStyle: React.CSSProperties = {
@@ -257,13 +292,13 @@ export default async function AnalyticsPage({
           const inner = (
             <>
               <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4, fontWeight: 500 }}>{c.label}</div>
-              <div style={{ fontSize: 26, fontWeight: 800, color: c.color, lineHeight: 1 }}>{c.value}</div>
+              <div style={{ fontSize: 24, fontWeight: 800, color: c.color, lineHeight: 1 }}>{c.value}</div>
               <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{c.sub}</div>
             </>
           )
           return c.href
-            ? <Link key={c.label} href={c.href} style={cardStyle}>{inner}</Link>
-            : <div key={c.label} style={cardStyle}>{inner}</div>
+            ? <Link key={c.label} href={c.href} style={cardStyle} title={c.tooltip}>{inner}</Link>
+            : <div key={c.label} style={cardStyle} title={c.tooltip}>{inner}</div>
         })}
       </div>
 
@@ -433,15 +468,26 @@ export default async function AnalyticsPage({
           <div style={{ padding: '16px 24px', borderBottom: '1px solid #f1f5f9' }}>
             <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>Estado por grupo</h2>
             <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 0' }}>
-              Ordenado por riesgo — sentiment, TTFR y tasa de resolución por cliente
+              Ordenado por riesgo — sentiment, TTFR (1ª respuesta), TTR (resolución) y tasa de cierre por cliente
             </p>
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f8fafc' }}>
-                  {['Grupo', 'Cliente', 'País', 'Mensajes', 'Inc. abiertas', 'Sentiment', 'TTFR avg', 'Resolución', 'Estado'].map(h => (
-                    <th key={h} style={{
+                  {[
+                    { h: 'Grupo' },
+                    { h: 'Cliente' },
+                    { h: 'País' },
+                    { h: 'Mensajes' },
+                    { h: 'Inc. abiertas' },
+                    { h: 'Sentiment' },
+                    { h: 'TTFR avg', tip: 'Tiempo a primera respuesta del agente 99 (promedio en el período).' },
+                    { h: 'TTR avg',  tip: 'Tiempo total a resolución (promedio en el período, sólo cerrados).' },
+                    { h: 'Resolución' },
+                    { h: 'Estado' },
+                  ].map(({ h, tip }) => (
+                    <th key={h} title={tip} style={{
                       padding: '10px 14px', fontSize: 11, fontWeight: 600, color: '#64748b',
                       textAlign: 'left', textTransform: 'uppercase', letterSpacing: '0.05em',
                       whiteSpace: 'nowrap', borderBottom: '1px solid #f1f5f9',
@@ -488,6 +534,9 @@ export default async function AnalyticsPage({
                     </td>
                     <td style={{ padding: '11px 14px', textAlign: 'center' }}>
                       <TtfrBadge min={g.avg_ttfr_minutes} />
+                    </td>
+                    <td style={{ padding: '11px 14px', textAlign: 'center' }}>
+                      <TtrBadge min={g.avg_ttr_minutes} />
                     </td>
                     <td style={{ padding: '11px 14px', textAlign: 'center', fontSize: 13, color: '#374151' }}>
                       {g.resolution_rate !== null ? (

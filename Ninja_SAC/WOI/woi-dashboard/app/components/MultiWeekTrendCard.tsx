@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react'
 import type { WeeklyTrendPoint } from '@/lib/queries'
 
-type Metric = 'messages' | 'incidents_opened' | 'resolution_rate' | 'sentiment' | 'avg_ttfr_minutes' | 'noise_pct'
+type Metric = 'messages' | 'incidents_opened' | 'resolution_rate' | 'sentiment' | 'avg_ttfr_minutes' | 'avg_ttr_minutes' | 'noise_pct'
 
 const METRIC_META: Record<Metric, {
   label: string
@@ -58,7 +58,16 @@ const METRIC_META: Record<Metric, {
     color: '#f59e0b',
     unit:  'min',
     direction: 'down',
-    desc:  'Promedio del tiempo a primera respuesta del agente. SLA: 30 min.',
+    desc:  'Promedio del tiempo a primera respuesta sustantiva del agente 99. SLA: 30 min.',
+    fmt:   (v) => v == null ? '—' : v < 60 ? `${v}m` : `${Math.floor(v / 60)}h ${v % 60}m`,
+  },
+  avg_ttr_minutes:  {
+    label: 'TTR promedio',
+    short: 'TTR',
+    color: '#db2777',
+    unit:  'min',
+    direction: 'down',
+    desc:  'Promedio del tiempo total a resolución del ticket (apertura → cierre).',
     fmt:   (v) => v == null ? '—' : v < 60 ? `${v}m` : `${Math.floor(v / 60)}h ${v % 60}m`,
   },
   noise_pct:        {
@@ -76,7 +85,8 @@ function pickColor(metric: Metric, value: number | null): string {
   const meta = METRIC_META[metric]
   if (value == null) return '#94a3b8'
   if (meta.direction === 'neutral') return meta.color
-  if (metric === 'avg_ttfr_minutes') return value > 60 ? '#ef4444' : value > 30 ? '#f59e0b' : '#10b981'
+  if (metric === 'avg_ttfr_minutes') return value > 60  ? '#ef4444' : value > 30 ? '#f59e0b' : '#10b981'
+  if (metric === 'avg_ttr_minutes')  return value > 240 ? '#ef4444' : value > 90 ? '#f59e0b' : '#10b981'
   if (metric === 'sentiment')        return value >= 7  ? '#10b981' : value >= 5 ? '#f59e0b' : '#ef4444'
   if (metric === 'resolution_rate')  return value >= 80 ? '#10b981' : value >= 50 ? '#f59e0b' : '#ef4444'
   if (metric === 'noise_pct')        return value > 60  ? '#ef4444' : value > 40  ? '#f59e0b' : '#10b981'
@@ -134,6 +144,7 @@ export default function MultiWeekTrendCard({
         metric === 'resolution_rate'  ? r.resolution_rate :
         metric === 'sentiment'        ? r.sentiment :
         metric === 'avg_ttfr_minutes' ? r.avg_ttfr_minutes :
+        metric === 'avg_ttr_minutes'  ? r.avg_ttr_minutes :
         metric === 'noise_pct'        ? r.noise_pct :
         null
       return { ...r, value }
@@ -282,7 +293,8 @@ export default function MultiWeekTrendCard({
               <th style={{ ...th, textAlign: 'right' }}>Msgs</th>
               <th style={{ ...th, textAlign: 'right' }}>Tickets</th>
               <th style={{ ...th, textAlign: 'right' }}>% Resol.</th>
-              <th style={{ ...th, textAlign: 'right' }}>TTFR</th>
+              <th style={{ ...th, textAlign: 'right' }} title="Tiempo a primera respuesta">TTFR</th>
+              <th style={{ ...th, textAlign: 'right' }} title="Tiempo a resolución total">TTR</th>
               <th style={{ ...th, textAlign: 'right' }}>Sentiment</th>
               <th style={{ ...th, textAlign: 'right' }}>Ruido</th>
             </tr>
@@ -321,6 +333,13 @@ export default function MultiWeekTrendCard({
                       ? <span style={{ color: '#cbd5e1' }}>—</span>
                       : <span style={{ color: pickColor('avg_ttfr_minutes', p.avg_ttfr_minutes), fontWeight: 600 }}>
                           {METRIC_META.avg_ttfr_minutes.fmt(p.avg_ttfr_minutes)}
+                        </span>}
+                  </td>
+                  <td style={{ ...td, textAlign: 'right' }}>
+                    {p.avg_ttr_minutes == null
+                      ? <span style={{ color: '#cbd5e1' }}>—</span>
+                      : <span style={{ color: pickColor('avg_ttr_minutes', p.avg_ttr_minutes), fontWeight: 600 }}>
+                          {METRIC_META.avg_ttr_minutes.fmt(p.avg_ttr_minutes)}
                         </span>}
                   </td>
                   <td style={{ ...td, textAlign: 'right' }}>

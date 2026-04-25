@@ -94,6 +94,14 @@ export default async function HomePage({
   const ttfrColor = kpis.avg_ttfr_minutes == null ? 'var(--text-muted)'
     : kpis.avg_ttfr_minutes > 30 ? 'var(--danger)' : 'var(--success)'
 
+  const ttrColor = kpis.avg_ttr_minutes == null ? 'var(--text-muted)'
+    : kpis.avg_ttr_minutes > 240 ? 'var(--danger)'   // > 4h: bad
+    : kpis.avg_ttr_minutes > 90  ? 'var(--warning)'  // > 1.5h: needs attention
+    : 'var(--success)'
+
+  const fmtMin = (v: number | null) =>
+    v == null ? '—' : v < 60 ? `${v} min` : `${Math.floor(v / 60)}h ${v % 60}m`
+
   // Portfolio-wide health (avg of per-group scores)
   const portfolioHealth = groups.length
     ? Math.round(groups.reduce((acc, g) => acc + g.health.total, 0) / groups.length)
@@ -285,20 +293,40 @@ export default async function HomePage({
           )}
         </div>
 
-        {/* 5. TTR promedio */}
-        <div className="stat-card">
+        {/* 5. TTFR promedio (Time To First Response) */}
+        <div className="stat-card" title="TTFR — Tiempo desde que el cliente abre el ticket hasta la primera respuesta sustantiva del agente 99.">
           <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-            TTR promedio
+            TTFR promedio
           </div>
           <div style={{ fontSize: 28, fontWeight: 800, color: ttfrColor, marginBottom: 4 }}>
-            {kpis.avg_ttfr_minutes != null ? `${kpis.avg_ttfr_minutes} min` : '—'}
+            {fmtMin(kpis.avg_ttfr_minutes)}
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            1ª respuesta de agente 99 · {kpis.range_label}
+            1ª respuesta del agente 99 · SLA 30m · {kpis.range_label}
           </div>
           {kpis.avg_ttfr_minutes != null && (
             <div style={{ fontSize: 11, marginTop: 6, fontWeight: 600, color: ttfrColor }}>
               {kpis.avg_ttfr_minutes <= 10 ? 'Excelente' : kpis.avg_ttfr_minutes <= 30 ? 'Aceptable' : 'Necesita mejora'}
+            </div>
+          )}
+        </div>
+
+        {/* 6. TTR promedio (Time To Resolution) */}
+        <div className="stat-card" title="TTR — Tiempo total desde que se abre el ticket hasta que se resuelve. Incluye TTFR + tiempo trabajando el caso.">
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+            TTR promedio
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: ttrColor, marginBottom: 4 }}>
+            {fmtMin(kpis.avg_ttr_minutes)}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            Resolución completa · {kpis.range_label}
+          </div>
+          {kpis.avg_ttr_minutes != null && (
+            <div style={{ fontSize: 11, marginTop: 6, fontWeight: 600, color: ttrColor }}>
+              {kpis.avg_ttr_minutes <= 60  ? 'Excelente' :
+               kpis.avg_ttr_minutes <= 90  ? 'Aceptable' :
+               kpis.avg_ttr_minutes <= 240 ? 'Atención'  : 'Crítico'}
             </div>
           )}
         </div>
@@ -326,15 +354,18 @@ export default async function HomePage({
         <table style={{ width: '100%', borderCollapse: 'collapse', overflow: 'visible' }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              {['', 'Grupo', 'Health', 'Operación / Cliente', 'Msgs hoy', 'Incidencias', 'Mix (7d)', 'Sentiment', 'TTFR (sem)', 'Último msg', ''].map((h, i) => (
-                <th key={i} style={{ padding: '10px 16px', textAlign: 'left', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap', ...(i === 10 ? { width: 90, paddingRight: 20 } : {}) }}>{h}</th>
+              {['', 'Grupo', 'Health', 'Operación / Cliente', 'Msgs hoy', 'Incidencias', 'Mix (7d)', 'Sentiment', 'TTFR (sem)', 'TTR (sem)', 'Último msg', ''].map((h, i) => (
+                <th key={i} style={{ padding: '10px 16px', textAlign: 'left', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap', ...(i === 11 ? { width: 90, paddingRight: 20 } : {}) }}
+                    title={h === 'TTFR (sem)' ? 'Tiempo a primera respuesta del agente 99 (últimos 7 días). SLA 30m.'
+                         : h === 'TTR (sem)'  ? 'Tiempo total a resolución del ticket (últimos 7 días, sólo cerrados).'
+                         : undefined}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {groups.length === 0 && (
               <tr>
-                <td colSpan={11} style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
+                <td colSpan={12} style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)' }}>
                   No hay grupos activos. Agrega el listener a un grupo de WhatsApp.
                 </td>
               </tr>
@@ -370,7 +401,16 @@ export default async function HomePage({
                 </td>
                 <td style={{ padding: '14px 16px', fontSize: 13 }}>
                   {g.avg_ttfr_minutes !== null
-                    ? <span style={{ color: g.avg_ttfr_minutes > 30 ? 'var(--danger)' : 'var(--success)' }}>{g.avg_ttfr_minutes} min</span>
+                    ? <span style={{ color: g.avg_ttfr_minutes > 30 ? 'var(--danger)' : 'var(--success)' }}>{fmtMin(g.avg_ttfr_minutes)}</span>
+                    : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                </td>
+                <td style={{ padding: '14px 16px', fontSize: 13 }}>
+                  {g.avg_ttr_minutes !== null
+                    ? <span style={{
+                        color: g.avg_ttr_minutes > 240 ? 'var(--danger)'
+                             : g.avg_ttr_minutes > 90  ? 'var(--warning)'
+                             : 'var(--success)',
+                      }}>{fmtMin(g.avg_ttr_minutes)}</span>
                     : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                 </td>
                 <td style={{ padding: '14px 16px' }}>
