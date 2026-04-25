@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, date as date_t
 
 from woi_analyzer.db import (
     compute_group_kpis_for_date,
@@ -64,3 +64,56 @@ def run_kpi_snapshot(day: datetime | None = None) -> dict:
     log.info("kpi_snapshot_batch_done", saved=saved, failed=failed,
              date=target_day.strftime("%Y-%m-%d"))
     return {"saved": saved, "failed": failed}
+
+
+def backfill_kpi_snapshots(
+    start: date_t | datetime,
+    end: date_t | datetime | None = None,
+) -> dict:
+    """
+    Recompute and upsert daily snapshots for every day in [start, end].
+
+    `end` defaults to today. Both ends inclusive.
+
+    Used after ingesting historical messages, after schema changes that affect
+    aggregation, or whenever the daily batch was missed for a window of days.
+    """
+    if isinstance(start, datetime):
+        start_d = start.date()
+    else:
+        start_d = start
+    if end is None:
+        end_d = datetime.now().astimezone().date()
+    elif isinstance(end, datetime):
+        end_d = end.date()
+    else:
+        end_d = end
+
+    if end_d < start_d:
+        raise ValueError(f"end ({end_d}) must be >= start ({start_d})")
+
+    days_done: list[str] = []
+    total_saved = total_failed = 0
+    cursor = start_d
+    while cursor <= end_d:
+        as_dt = datetime.combine(cursor, datetime.min.time()).astimezone()
+        log.info("kpi_snapshot_backfill_day", date=cursor.isoformat())
+        result = run_kpi_snapshot(day=as_dt)
+        total_saved  += result["saved"]
+        total_failed += result["failed"]
+        days_done.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+
+    log.info(
+        "kpi_snapshot_backfill_done",
+        days=len(days_done),
+        saved=total_saved,
+        failed=total_failed,
+    )
+    return {
+        "days": len(days_done),
+        "saved": total_saved,
+        "failed": total_failed,
+        "from": start_d.isoformat(),
+        "to":   end_d.isoformat(),
+    }

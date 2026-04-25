@@ -5,15 +5,25 @@ import {
   getIncidentCategoryBreakdown,
   getAnalyticsTimeSeries,
   getGroupScorecard,
+  getChurnOpenCounts,
+  getChurnDailyTrend,
+  getPortfolioMessageMix,
+  getTtfrByCategory,
+  getAgentAnalysis,
+  getFeedbackCounts,
+  getMultiWeekTrend,
+  FEEDBACK_FIELD_LABEL,
+  MIX_META,
   CATEGORY_ES,
 } from '@/lib/queries'
 import Link from 'next/link'
 import { Suspense } from 'react'
 import AnalyticsFilters from '@/app/components/AnalyticsFilters'
-import nextDynamic from 'next/dynamic'
-
-const TrendChart = nextDynamic(() => import('@/app/components/TrendChart'), { ssr: false })
-const TtfrChart  = nextDynamic(() => import('@/app/components/TtfrChart'),  { ssr: false })
+import AnalyticsCharts from '@/app/components/AnalyticsCharts'
+import ChurnAnalyticsCard from '@/app/components/ChurnAnalyticsCard'
+import TtfrByCategoryCard from '@/app/components/TtfrByCategoryCard'
+import AgentLeaderboardCard from '@/app/components/AgentLeaderboardCard'
+import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -48,6 +58,30 @@ function formatMinutes(seconds: number | null) {
   if (seconds === null) return '—'
   const m = Math.round(seconds / 60)
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+// ── feedback KPI helpers ────────────────────────────────────────────────────
+const feedbackLabel: React.CSSProperties = {
+  fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em',
+  color: '#64748b',
+}
+const feedbackValue: React.CSSProperties = {
+  fontSize: 22, fontWeight: 800, lineHeight: 1.05, color: '#0f172a',
+}
+const feedbackHint: React.CSSProperties = {
+  fontSize: 11, color: '#64748b',
+}
+function feedbackKpi(color: string, bg: string, border: string): React.CSSProperties {
+  return {
+    background: bg,
+    border: `1px solid ${border}`,
+    borderLeft: `3px solid ${color}`,
+    borderRadius: 8,
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  }
 }
 
 function SentimentDot({ val }: { val: number | null }) {
@@ -109,15 +143,26 @@ export default async function AnalyticsPage({
   const groupId = sp.group   ? parseInt(sp.group) : null
   const days    = parseInt(period) || 30
 
+  // Multi-week trend lives on its own selector; defaults to 8w.
+  const weeksRaw = sp.weeks ? parseInt(sp.weeks) : 8
+  const weeks    = [4, 8, 12].includes(weeksRaw) ? weeksRaw : 8
+
   const { from, to } = resolveDates(period)
 
-  const [agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard] = await Promise.all([
+  const [agents, openIncidents, dailyReports, categoryBreakdown, timeSeries, scorecard, churnCounts, churnTrend, portfolioMix, ttfrByCategory, agentAnalysis, feedbackCounts, weeklyTrend] = await Promise.all([
     getAgentLeaderboard(),
     getOpenIncidents(),
     getDailyReports(14),
     getIncidentCategoryBreakdown(days),
     getAnalyticsTimeSeries(from, to, groupId),
     getGroupScorecard(from, to),
+    getChurnOpenCounts(),
+    getChurnDailyTrend(Math.min(days, 30)),
+    getPortfolioMessageMix(Math.min(days, 30)),
+    getTtfrByCategory(from, to, groupId),
+    getAgentAnalysis(from, to, groupId),
+    getFeedbackCounts(Math.min(days, 90)),
+    getMultiWeekTrend(weeks, groupId),
   ])
 
   // Fetch groups list for the filter dropdown
@@ -151,11 +196,11 @@ export default async function AnalyticsPage({
 
   return (
     <div style={{ paddingBottom: 80 }}>
-      {/* ── Header ── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
+      {/* ── Compact header: title + filters on same row ── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700, color: '#111827', margin: 0 }}>Analytics</h1>
-          <p style={{ color: '#6b7280', fontSize: 14, marginTop: 4 }}>
+          <h1 style={{ fontSize: 20, fontWeight: 700, color: '#111827', margin: 0 }}>Analytics</h1>
+          <p style={{ color: '#6b7280', fontSize: 13, marginTop: 2 }}>
             {periodLabel[period] ?? period}
             {groupId ? ` · ${groups.find(g => g.id === groupId)?.name ?? 'grupo'}` : ' · todos los grupos'}
           </p>
@@ -165,8 +210,11 @@ export default async function AnalyticsPage({
         </Suspense>
       </div>
 
-      {/* ── KPI Summary cards ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 32 }}>
+      {/* ── CHARTS FIRST — above the fold ── */}
+      <AnalyticsCharts data={timeSeries} periodLabel={periodLabel[period] ?? period} />
+
+      {/* ── KPI Summary cards — below charts ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 28 }}>
         {[
           {
             label: 'Incidencias abiertas',
@@ -200,43 +248,183 @@ export default async function AnalyticsPage({
             bg: '#fef2f2',
             href: null,
           },
-        ].map(c => (
-          <div key={c.label} style={{
-            background: c.bg, border: '1px solid #e5e7eb', borderRadius: 12, padding: '16px 20px',
+        ].map(c => {
+          const cardStyle: React.CSSProperties = {
+            background: c.bg, border: '1px solid #e5e7eb', borderRadius: 12, padding: '14px 18px',
             cursor: c.href ? 'pointer' : 'default',
-          }}
-            onClick={c.href ? () => window.location.href = c.href! : undefined}
-          >
-            <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 6, fontWeight: 500 }}>{c.label}</div>
-            <div style={{ fontSize: 28, fontWeight: 800, color: c.color, lineHeight: 1 }}>{c.value}</div>
-            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{c.sub}</div>
-          </div>
-        ))}
+            display: 'block', textDecoration: 'none', color: 'inherit',
+          }
+          const inner = (
+            <>
+              <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4, fontWeight: 500 }}>{c.label}</div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: c.color, lineHeight: 1 }}>{c.value}</div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{c.sub}</div>
+            </>
+          )
+          return c.href
+            ? <Link key={c.label} href={c.href} style={cardStyle}>{inner}</Link>
+            : <div key={c.label} style={cardStyle}>{inner}</div>
+        })}
       </div>
 
-      {/* ── Charts section ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 24, marginBottom: 32 }}>
-        {/* Main trend chart */}
-        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 14, padding: '20px 24px' }}>
-          <div style={{ marginBottom: 4 }}>
-            <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>Mensajes · Incidencias · Sentiment</h2>
-            <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 16px' }}>
-              Tendencia diaria — {periodLabel[period] ?? period}
-            </p>
+      {/* ── Portfolio Message Mix ── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 14, padding: '18px 22px', marginBottom: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: '#64748b', letterSpacing: '0.05em' }}>
+              Mix de mensajes · portfolio
+            </div>
+            <h3 style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 700, color: '#0f172a' }}>
+              {portfolioMix.total.toLocaleString('es-MX')} mensajes clasificados en {Math.min(days, 30)} días
+            </h3>
           </div>
-          <TrendChart data={timeSeries} />
+          <div style={{ fontSize: 11, color: '#64748b', maxWidth: 480, lineHeight: 1.45 }}>
+            <strong style={{ color: '#0f172a' }}>Operativos</strong> = confirmaciones, presentaciones, reportes ·{' '}
+            <strong style={{ color: '#0f172a' }}>Incidencias</strong> = problemas reportados ·{' '}
+            <strong style={{ color: '#0f172a' }}>Ruido</strong> = saludos / acuses / consultas sin información accionable.
+          </div>
         </div>
 
-        {/* TTFR + Resolution chart */}
-        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 14, padding: '20px 24px' }}>
-          <div style={{ marginBottom: 4 }}>
-            <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>TTFR y Tasa de resolución</h2>
-            <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 16px' }}>
-              Tiempo hasta primera respuesta (barras) y % de incidencias resueltas (línea)
+        {/* Stacked bar */}
+        <div style={{ display: 'flex', height: 28, borderRadius: 8, overflow: 'hidden', background: '#f1f5f9' }}>
+          {(['operativos', 'incidencias', 'ruido'] as const).map((k) => {
+            const pct = portfolioMix[`pct_${k}` as const]
+            if (pct === 0) return null
+            return (
+              <div
+                key={k}
+                style={{
+                  width: `${pct}%`,
+                  background: MIX_META[k].color,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: '#fff',
+                  textShadow: '0 1px 2px rgba(0,0,0,0.18)',
+                }}
+                title={`${MIX_META[k].label}: ${portfolioMix[k as 'operativos'|'incidencias'|'ruido']} (${pct}%)`}
+              >
+                {pct >= 6 ? `${pct}%` : ''}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Bucket pills */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 14 }}>
+          {(['operativos', 'incidencias', 'ruido'] as const).map((k) => {
+            const meta = MIX_META[k]
+            const pct = portfolioMix[`pct_${k}` as const]
+            const cnt = portfolioMix[k as 'operativos'|'incidencias'|'ruido']
+            return (
+              <div
+                key={k}
+                style={{
+                  background: meta.bg,
+                  border: `1px solid ${meta.border}`,
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: meta.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    {meta.label}
+                  </span>
+                  <span style={{ fontSize: 22, fontWeight: 800, color: meta.color, lineHeight: 1 }}>{pct}%</span>
+                </div>
+                <div style={{ fontSize: 11, color: '#475569', marginTop: 4, lineHeight: 1.4 }}>
+                  {cnt.toLocaleString('es-MX')} msgs · {meta.desc}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ── Churn Risk Detection ── */}
+      <ChurnAnalyticsCard counts={churnCounts} trend={churnTrend} />
+
+      {/* ── Multi-week trend (T08) ── */}
+      <MultiWeekTrendCard
+        rows={weeklyTrend}
+        weeksParam={weeks}
+        title={groupId ? `Tendencia ${weeks} semanas — ${groups.find(g => g.id === groupId)?.name ?? 'grupo'}` : `Tendencia ${weeks} semanas — portfolio`}
+      />
+
+      {/* ── TTFR by category ── */}
+      <TtfrByCategoryCard rows={ttfrByCategory} periodLabel={periodLabel[period] ?? period} />
+
+      {/* ── Classification feedback (T07) ── */}
+      <div style={{
+        background: '#fff', border: '1px solid #e2e8f0', borderRadius: 14,
+        padding: '18px 24px', marginBottom: 32,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+          <div>
+            <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, color: '#0f172a' }}>
+              Correcciones de clasificación
+            </h2>
+            <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 0' }}>
+              Feedback humano sobre lo que Sonnet/Haiku clasificó —
+              {feedbackCounts.last_submitted_at
+                ? ` última hace ${(() => {
+                    const ms = Date.now() - new Date(feedbackCounts.last_submitted_at).getTime()
+                    const h = Math.floor(ms / 3_600_000)
+                    if (h < 1)  return `${Math.floor(ms / 60_000)} min`
+                    if (h < 24) return `${h}h`
+                    return `${Math.floor(h / 24)}d`
+                  })()}`
+                : ' aún no hay correcciones registradas.'}
             </p>
           </div>
-          <TtfrChart data={timeSeries} />
+          <span style={{ fontSize: 11, color: '#94a3b8' }}>
+            {periodLabel[period] ?? period}
+          </span>
         </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+          {/* Total */}
+          <div style={feedbackKpi('#0f172a', '#f1f5f9', '#e2e8f0')}>
+            <span style={feedbackLabel}>Total</span>
+            <span style={feedbackValue}>{feedbackCounts.total}</span>
+            <span style={feedbackHint}>
+              {feedbackCounts.unique_incidents} ticket{feedbackCounts.unique_incidents === 1 ? '' : 's'}
+            </span>
+          </div>
+          {/* By field */}
+          {(['category', 'urgency', 'sentiment', 'summary', 'bucket', 'other'] as const).map((f) => {
+            const v = feedbackCounts.by_field[f]
+            if (v === 0 && feedbackCounts.total > 0 && f !== 'category' && f !== 'urgency' && f !== 'sentiment') return null
+            const COLOR: Record<typeof f, [string, string, string]> = {
+              category:  ['#0369a1', '#eff6ff', '#bfdbfe'],
+              urgency:   ['#b91c1c', '#fef2f2', '#fecaca'],
+              sentiment: ['#9333ea', '#faf5ff', '#e9d5ff'],
+              summary:   ['#0d9488', '#f0fdfa', '#99f6e4'],
+              bucket:    ['#a16207', '#fffbeb', '#fde68a'],
+              other:     ['#475569', '#f8fafc', '#cbd5e1'],
+            }
+            const [color, bg, border] = COLOR[f]
+            return (
+              <div key={f} style={feedbackKpi(color, bg, border)}>
+                <span style={feedbackLabel}>{FEEDBACK_FIELD_LABEL[f]}</span>
+                <span style={feedbackValue}>{v}</span>
+                <span style={feedbackHint}>
+                  {feedbackCounts.total > 0 ? Math.round((v / feedbackCounts.total) * 100) : 0}%
+                </span>
+              </div>
+            )
+          })}
+        </div>
+
+        <p style={{ fontSize: 11, color: '#94a3b8', margin: '14px 0 0', lineHeight: 1.5 }}>
+          Cada corrección sobrescribe el campo en el ticket y queda registrada en{' '}
+          <code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: 4, fontSize: 10 }}>
+            classification_feedback
+          </code>
+          {' '}para reentrenar prompts y medir la calidad del modelo.
+        </p>
       </div>
 
       {/* ── Group Scorecard ── */}
@@ -410,57 +598,11 @@ export default async function AnalyticsPage({
         </div>
       </div>
 
-      {/* ── Agent Leaderboard ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, overflow: 'hidden' }}>
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between' }}>
-            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: '#111827' }}>Leaderboard agentes</h2>
-            <span style={{ fontSize: 13, color: '#6b7280' }}>{agents.length} activos</span>
-          </div>
-          {agents.length === 0 ? (
-            <div style={{ padding: '24px', color: '#6b7280', fontSize: 14, textAlign: 'center' }}>Sin datos de agentes</div>
-          ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ background: '#f9fafb' }}>
-                  {['#', 'Agente', 'Incid.', 'TTFR', 'TTR', 'Resol.'].map(h => (
-                    <th key={h} style={{ padding: '8px 12px', fontSize: 11, fontWeight: 600, color: '#6b7280', textAlign: 'left', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {agents.map((a, i) => (
-                  <tr key={a.agent_phone} style={{ borderTop: '1px solid #f3f4f6', background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
-                    <td style={{ padding: '9px 12px', fontSize: 12, color: '#94a3b8', fontWeight: 700 }}>#{i + 1}</td>
-                    <td style={{ padding: '9px 12px' }}>
-                      <div style={{ fontSize: 13, fontWeight: 500, color: '#111827' }}>
-                        {a.agent_name || `...${a.agent_phone.slice(-4)}`}
-                      </div>
-                    </td>
-                    <td style={{ padding: '9px 12px', fontSize: 13, color: '#374151', textAlign: 'center' }}>{a.incidents_attended}</td>
-                    <td style={{ padding: '9px 12px', textAlign: 'center' }}>
-                      <TtfrBadge min={a.avg_ttfr_minutes !== null ? Math.round(a.avg_ttfr_minutes) : null} />
-                    </td>
-                    <td style={{ padding: '9px 12px', fontSize: 12, color: '#6b7280', textAlign: 'center' }}>
-                      {a.avg_ttr_minutes !== null ? `${a.avg_ttr_minutes?.toFixed(0)}m` : '—'}
-                    </td>
-                    <td style={{ padding: '9px 12px', fontSize: 12, textAlign: 'center' }}>
-                      {a.resolution_rate_pct !== null ? (
-                        <span style={{ color: a.resolution_rate_pct >= 70 ? '#10b981' : a.resolution_rate_pct >= 40 ? '#f59e0b' : '#ef4444', fontWeight: 700 }}>
-                          {a.resolution_rate_pct.toFixed(0)}%
-                        </span>
-                      ) : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+      {/* ── Agent Analysis (full width) ── */}
+      <AgentLeaderboardCard rows={agentAnalysis} periodLabel={periodLabel[period] ?? period} />
 
-        {/* Open Incidents */}
+      {/* ── Open Incidents (side panel) ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 24, marginBottom: 32 }}>
         <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, overflow: 'hidden' }}>
           <div style={{ padding: '16px 20px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between' }}>
             <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0, color: '#111827' }}>Incidencias abiertas</h2>

@@ -1,7 +1,9 @@
-import { getTicketDetail, getTicketStatusLogs, TICKET_STATUS_META, CATEGORY_ES, type TicketStatus } from '@/lib/queries'
+import { getTicketDetail, getTicketStatusLogs, getChurnSignalsForIncident, getOpenChurnSignals, listFeedbackForIncident, TICKET_STATUS_META, CATEGORY_ES, type TicketStatus } from '@/lib/queries'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import StatusChanger from '@/app/components/StatusChanger'
+import ChurnAlertBanner from '@/app/components/ChurnAlertBanner'
+import ClassificationFeedbackCard from '@/app/components/ClassificationFeedbackCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -102,11 +104,19 @@ export default async function TicketDetailPage({
   const ticketId = parseInt(id)
   if (isNaN(ticketId)) notFound()
 
-  const [ticket, logs] = await Promise.all([
+  const [ticket, logs, incidentChurn, feedbackHistory] = await Promise.all([
     getTicketDetail(ticketId),
     getTicketStatusLogs(ticketId),
+    getChurnSignalsForIncident(ticketId),
+    listFeedbackForIncident(ticketId),
   ])
   if (!ticket) notFound()
+
+  // If no signals are attached directly to this incident, also peek at recent
+  // open signals from the same group (collapsed by default).
+  const groupChurn = incidentChurn.length === 0
+    ? await getOpenChurnSignals({ groupId: ticket.group_id, limit: 10 })
+    : []
 
   const status  = ticket.status as TicketStatus
   const meta    = TICKET_STATUS_META[status]
@@ -158,6 +168,23 @@ export default async function TicketDetailPage({
         </div>
       </div>
 
+      {/* Churn-risk banner: incident-attached first, else group-level (collapsed) */}
+      {incidentChurn.length > 0 && (
+        <ChurnAlertBanner
+          signals={incidentChurn}
+          groupId={ticket.group_id}
+          variant="banner"
+        />
+      )}
+      {incidentChurn.length === 0 && groupChurn.length > 0 && (
+        <ChurnAlertBanner
+          signals={groupChurn}
+          groupId={ticket.group_id}
+          variant="banner"
+          collapsedByDefault
+        />
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 24 }}>
 
         {/* ── LEFT: summary + thread ── */}
@@ -174,6 +201,19 @@ export default async function TicketDetailPage({
               </p>
             </div>
           )}
+
+          {/* Classification feedback (T07) */}
+          <ClassificationFeedbackCard
+            incidentId={ticket.id}
+            groupId={ticket.group_id}
+            current={{
+              category:      ticket.category,
+              urgency:       ticket.urgency,
+              sentiment_avg: ticket.sentiment_avg != null ? Number(ticket.sentiment_avg) : null,
+              summary:       ticket.summary,
+            }}
+            history={feedbackHistory}
+          />
 
           {/* Message thread */}
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>

@@ -9,25 +9,28 @@ export default function Topbar() {
     }}>
       <div style={{ maxWidth: 1280, margin: '0 auto', padding: '0 24px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-              <rect width="32" height="32" rx="8" fill="#5a9e2f"/>
-              <text x="16" y="22" textAnchor="middle" fill="white" fontSize="13" fontWeight="800" fontFamily="Inter, sans-serif">99</text>
-            </svg>
+          <a href="/" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}>
+            <img
+              src="/ninja-ops-monitor.jpg"
+              alt="Ninja Ops Monitor"
+              width={32}
+              height={32}
+              style={{ borderRadius: 8, display: 'block', objectFit: 'cover' }}
+            />
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)', lineHeight: 1.2 }}>
-                99minutos
+                Ninja Ops
               </div>
               <div style={{ fontSize: 10, fontWeight: 500, color: 'var(--brand-green)', letterSpacing: '0.08em', textTransform: 'uppercase', lineHeight: 1 }}>
-                Ops Intelligence
+                Monitor
               </div>
             </div>
-          </div>
+          </a>
 
           <div style={{ width: 1, height: 24, background: 'var(--border)', margin: '0 4px' }} />
 
           <div style={{ display: 'flex', gap: 2 }}>
-            {[{ href: '/', label: 'Grupos' }, { href: '/tickets', label: 'Tickets' }, { href: '/media', label: 'Media' }, { href: '/analytics', label: 'Analytics' }].map(link => (
+            {[{ href: '/briefing', label: 'Briefing' }, { href: '/', label: 'Grupos' }, { href: '/tickets', label: 'Tickets' }, { href: '/agentes', label: 'Agentes' }, { href: '/churn', label: 'Churn' }, { href: '/analytics', label: 'Analytics' }, { href: '/voc', label: 'VoC' }].map(link => (
               <a key={link.href} href={link.href} style={{
                 fontSize: 13, fontWeight: 500, color: 'var(--text-sub)',
                 textDecoration: 'none', padding: '5px 10px', borderRadius: 6,

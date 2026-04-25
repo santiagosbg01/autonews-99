@@ -460,6 +460,55 @@ def ask_is_resolved(messages: list[dict], category: str | None) -> bool:
     stop=stop_after_attempt(3),
     reraise=True,
 )
+def generate_morning_briefing(input_data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Genera el morning briefing con Sonnet.
+    Retorna (briefing_json, usage_dict).
+    """
+    system_prompt = _read_prompt("morning_briefing.md")
+    user_content = (
+        "Datos para el briefing (JSON):\n\n"
+        f"```json\n{json.dumps(input_data, ensure_ascii=False, indent=2, default=str)}\n```\n\n"
+        "Genera el briefing JSON ahora."
+    )
+
+    response = get_client().messages.create(
+        model=CONFIG.anthropic.sonnet_model,
+        max_tokens=4096,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_content}],
+    )
+    text = "".join(
+        getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+    ).strip()
+
+    try:
+        result = _extract_json(text)
+    except ValueError:
+        log.warning("morning_briefing_json_failed", text_len=len(text), tail=text[-200:])
+        result = {
+            "headline": "Briefing no disponible (parse error).",
+            "highlights": [],
+            "incidents_summary": [],
+            "groups_to_watch": [],
+            "trend_note": "",
+            "churn_signals": [],
+            "agents_red_zone": [],
+        }
+
+    usage = {
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+    }
+    return result, usage
+
+
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APIError)),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
 def generate_daily_summary(input_data: dict[str, Any]) -> str:
     """Genera el brief ejecutivo con Sonnet."""
     system_prompt = _read_prompt("daily_summary.md")

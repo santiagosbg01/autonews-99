@@ -12,7 +12,7 @@ from woi_analyzer.daily_batch import run_daily_batch
 from woi_analyzer.db import compute_haiku_consistency, fetch_taxonomy, reset_analyzed_flag
 from woi_analyzer.group_analyst import run_group_analysis_batch
 from woi_analyzer.incident_reconstructor import reconstruct_recent_incidents
-from woi_analyzer.kpi_snapshotter import run_kpi_snapshot
+from woi_analyzer.kpi_snapshotter import backfill_kpi_snapshots, run_kpi_snapshot
 
 
 @click.group()
@@ -78,6 +78,20 @@ def snapshot_kpis() -> None:
     """Save today's KPI snapshot for all active groups."""
     result = run_kpi_snapshot()
     click.echo(json.dumps(result, indent=2))
+
+
+@main.command("snapshot-kpis-backfill")
+@click.option("--from", "from_date", type=str, required=True,
+              help="Start date YYYY-MM-DD (inclusive)")
+@click.option("--to", "to_date", type=str, default=None,
+              help="End date YYYY-MM-DD (inclusive). Defaults to today.")
+def snapshot_kpis_backfill(from_date: str, to_date: str | None) -> None:
+    """Recompute group_kpi_snapshots for every day in [from, to]."""
+    from datetime import date as date_t
+    start = date_t.fromisoformat(from_date)
+    end = date_t.fromisoformat(to_date) if to_date else None
+    result = backfill_kpi_snapshots(start=start, end=end)
+    click.echo(json.dumps(result, indent=2, default=str))
 
 
 @main.command("analyze-media")
@@ -147,6 +161,71 @@ def reanalyze_all(yes: bool) -> None:
     click.echo(f"    {_json.dumps(kpi)}")
 
     click.echo("✅ Re-análisis completo.")
+
+
+@main.command("briefing")
+@click.option("--date", "date_str", type=str, default=None,
+              help="Fecha local que cubre el briefing (YYYY-MM-DD). Default: ayer.")
+@click.option("--group-id", "group_id", type=int, default=None,
+              help="Genera el briefing solo para un grupo. Default: todos los grupos activos.")
+@click.option("--all-groups", "all_groups", is_flag=True, default=False,
+              help="Itera todos los grupos activos (ignora la verificación de hora local).")
+@click.option("--global", "as_global", is_flag=True, default=False,
+              help="Genera un briefing global legacy (sin group_id).")
+def briefing(date_str: str | None, group_id: int | None, all_groups: bool, as_global: bool) -> None:
+    """
+    Genera el morning briefing.
+    
+    - sin flags  → corre 'due briefings' (igual que el scheduler hourly)
+    - --group-id → un solo grupo (en cualquier hora)
+    - --all-groups → itera todos los grupos activos
+    - --global → briefing global (legacy)
+    """
+    from datetime import datetime
+    from woi_analyzer.morning_briefing import run_morning_briefing, run_due_briefings
+
+    target = datetime.fromisoformat(date_str) if date_str else None
+
+    if as_global:
+        result = run_morning_briefing(target_date=target, group_id=None)
+    elif group_id is not None:
+        result = run_morning_briefing(target_date=target, group_id=group_id)
+    elif all_groups:
+        result = run_due_briefings(force=True)
+    else:
+        result = run_due_briefings(force=False)
+
+    click.echo(json.dumps(result, indent=2, default=str))
+
+
+@main.command("churn-scan")
+@click.option("--lookback-hours", type=int, default=24,
+              help="Cuántas horas hacia atrás escanear (default 24).")
+@click.option("--limit", type=int, default=5000,
+              help="Máximo de mensajes a evaluar por corrida.")
+def churn_scan(lookback_hours: int, limit: int) -> None:
+    """Escanea mensajes recientes y persiste señales de churn-risk."""
+    from woi_analyzer.churn_detector import scan_recent_messages
+    result = scan_recent_messages(lookback_hours=lookback_hours, limit=limit)
+    click.echo(json.dumps(result, indent=2, default=str))
+
+
+@main.command("churn-list")
+@click.option("--group-id", type=int, default=None, help="Solo este grupo.")
+@click.option("--limit", type=int, default=20)
+def churn_list(group_id: int | None, limit: int) -> None:
+    """Lista las señales de churn-risk abiertas."""
+    from woi_analyzer.db import list_open_churn_signals
+    rows = list_open_churn_signals(group_id=group_id, limit=limit)
+    if not rows:
+        click.echo("(no hay señales abiertas)")
+        return
+    for r in rows:
+        click.echo(
+            f"#{r['id']:<5} [{r['severity']:<20}] {r['group_name']!s:<30} "
+            f"{r['detected_at'].strftime('%Y-%m-%d %H:%M')!s:<18} "
+            f"src={r['source']:<18} → {(r['quote'] or '')[:120]}"
+        )
 
 
 @main.command("schedule")

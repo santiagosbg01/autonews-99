@@ -36,13 +36,25 @@ const LABEL_ES: Record<string, string> = {
 const BUCKET_COLOR: Record<string, string> = {
   A: '#10b981',
   B: '#ef4444',
-  C: '#6b7280',
+  C: '#94a3b8',
 }
 
 const BUCKET_BG: Record<string, string> = {
-  A: '#f0fdf4',
+  A: '#ecfdf5',
   B: '#fef2f2',
-  C: '#f9fafb',
+  C: '#f1f5f9',
+}
+
+const BUCKET_LABEL: Record<string, string> = {
+  A: 'Operativos',
+  B: 'Incidencias',
+  C: 'Ruido',
+}
+
+const BUCKET_DESC: Record<string, string> = {
+  A: 'Confirmaciones, presentaciones y reportes de entrega — operación corriendo bien.',
+  B: 'Problemas reportados (unidad, horario, sistema, robo) — requieren atención.',
+  C: 'Saludos, acuses, consultas y mensajes sin información operativa accionable.',
 }
 
 export default function CategoryBreakdown({ counts }: { counts: Record<string, number> }) {
@@ -68,24 +80,39 @@ export default function CategoryBreakdown({ counts }: { counts: Record<string, n
   return (
     <div style={{ padding: '16px 20px' }}>
       {/* Bucket summary pills */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 18 }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
         {(['A', 'B', 'C'] as const).map(b => {
           const cnt = byBucket[b].reduce((s, [, n]) => s + n, 0)
           const pct = total > 0 ? Math.round(cnt / total * 100) : 0
           return (
             <div key={b} style={{
               flex: 1, padding: '10px 14px', borderRadius: 10,
-              background: BUCKET_BG[b], border: `1px solid ${BUCKET_COLOR[b]}22`,
+              background: BUCKET_BG[b], border: `1px solid ${BUCKET_COLOR[b]}33`,
               textAlign: 'center',
-            }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: BUCKET_COLOR[b], marginBottom: 2 }}>
-                {b === 'A' ? 'Positivos' : b === 'B' ? 'Incidencias' : 'Conversacional'}
+            }}
+              title={BUCKET_DESC[b]}
+            >
+              <div style={{ fontSize: 11, fontWeight: 700, color: BUCKET_COLOR[b], marginBottom: 2, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                {BUCKET_LABEL[b]}
               </div>
               <div style={{ fontSize: 22, fontWeight: 700, color: BUCKET_COLOR[b] }}>{cnt}</div>
               <div style={{ fontSize: 11, color: '#6b7280' }}>{pct}%</div>
             </div>
           )
         })}
+      </div>
+
+      {/* Legend / disclaimer */}
+      <div style={{
+        fontSize: 11, color: '#475569', background: '#f8fafc',
+        border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px',
+        marginBottom: 16, lineHeight: 1.45,
+      }}>
+        <strong style={{ color: '#0f172a' }}>¿Qué significan los buckets?</strong>{' '}
+        <span style={{ color: BUCKET_COLOR.A, fontWeight: 600 }}>Operativos</span> = confirmaciones / presentaciones / reportes ·{' '}
+        <span style={{ color: BUCKET_COLOR.B, fontWeight: 600 }}>Incidencias</span> = problemas reportados ·{' '}
+        <span style={{ color: BUCKET_COLOR.C, fontWeight: 600 }}>Ruido</span> = saludos, acuses y consultas sin información accionable.
+        Las métricas (TTFR, sentiment) se calculan sobre Operativos + Incidencias.
       </div>
 
       {/* Per-category bars */}

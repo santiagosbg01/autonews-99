@@ -3,8 +3,8 @@ import './globals.css'
 import Topbar from './components/Topbar'
 
 export const metadata: Metadata = {
-  title: 'WOI — 99minutos Ops Intelligence',
-  description: 'Panel interno de inteligencia operativa de grupos WhatsApp',
+  title: 'Ninja Ops Monitor',
+  description: 'Monitor de operación 99minutos — inteligencia en tiempo real de grupos WhatsApp',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

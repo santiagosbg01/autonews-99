@@ -1,10 +1,14 @@
-import { getGroupDetail, getGroupMessages, getGroupParticipants, getGroupIncidents, getGroupKpiHistory, getLatestGroupAnalysis, getGroupCategoryBreakdown, TICKET_STATUS_META, CATEGORY_ES, type IncidentRow, type TicketStatus } from '@/lib/queries'
+import { getGroupDetail, getGroupMessages, getGroupParticipants, getGroupIncidents, getGroupKpiHistory, getLatestGroupAnalysis, getGroupCategoryBreakdown, getGroupHealth, getOpenChurnSignals, getGroupMessageMix, getMultiWeekTrend, TICKET_STATUS_META, CATEGORY_ES, type IncidentRow, type TicketStatus } from '@/lib/queries'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import SentimentGauge from '@/app/components/SentimentGauge'
 import Interpretaciones from '@/app/components/Interpretaciones'
 import GroupAnalysisCard from '@/app/components/GroupAnalysisCard'
 import CategoryBreakdown from '@/app/components/CategoryBreakdown'
+import HealthScoreCard from '@/app/components/HealthScoreCard'
+import ChurnAlertBanner from '@/app/components/ChurnAlertBanner'
+import NoiseBar from '@/app/components/NoiseBar'
+import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -53,13 +57,20 @@ function RoleBadge({ role }: { role: string }) {
   )
 }
 
-export default async function GroupPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function GroupPage({ params, searchParams }: {
+  params: Promise<{ id: string }>
+  searchParams?: Promise<Record<string, string>>
+}) {
   const { id } = await params
+  const sp = (await (searchParams ?? Promise.resolve({}))) as Record<string, string>
   const groupId = parseInt(id)
   if (isNaN(groupId)) notFound()
 
+  const weeksRaw = sp.weeks ? parseInt(sp.weeks) : 8
+  const weeks    = [4, 8, 12].includes(weeksRaw) ? weeksRaw : 8
+
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-  const [group, messages, participants, incidents, kpiHistory, latestAnalysis, categoryBreakdown] = await Promise.all([
+  const [group, messages, participants, incidents, kpiHistory, latestAnalysis, categoryBreakdown, health, churnSignals, mix, weeklyTrend] = await Promise.all([
     getGroupDetail(groupId),
     getGroupMessages(groupId, 60),
     getGroupParticipants(groupId),
@@ -67,6 +78,10 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
     getGroupKpiHistory(groupId, 30),
     getLatestGroupAnalysis(groupId),
     getGroupCategoryBreakdown(groupId, since7d),
+    getGroupHealth(groupId),
+    getOpenChurnSignals({ groupId, limit: 20 }),
+    getGroupMessageMix(groupId, 7),
+    getMultiWeekTrend(weeks, groupId),
   ])
 
   if (!group) notFound()
@@ -101,11 +116,28 @@ export default async function GroupPage({ params }: { params: Promise<{ id: stri
           <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
             {group.timezone} · Desde {new Date(group.joined_at).toLocaleDateString('es-MX')}
           </div>
+          <div style={{ marginTop: 10, maxWidth: 460 }}>
+            <NoiseBar mix={mix} variant="detailed" width="100%" />
+          </div>
         </div>
         <Link href={`/onboarding/${group.id}`} className="btn-ghost" style={{ fontSize: 13 }}>
           Mapear participantes
         </Link>
       </div>
+
+      {/* Churn risk alert (if any open signals) */}
+      <ChurnAlertBanner signals={churnSignals} groupId={groupId} variant="banner" />
+
+      {/* Client Health Score */}
+      <HealthScoreCard health={health} />
+
+      {/* Multi-week trend (T08) */}
+      <MultiWeekTrendCard
+        rows={weeklyTrend}
+        weeksParam={weeks}
+        title={`Tendencia ${weeks} semanas — ${group.name}`}
+        initialMetric="incidents_opened"
+      />
 
       {/* Stats row */}
       <div className="grid grid-cols-5 gap-3 mb-6">

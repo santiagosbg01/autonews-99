@@ -1,13 +1,15 @@
 """
 Scheduler de producción para Railway.
 
-- Cada hora en horario laboral (06:00–22:00 hora CDMX):
-    1. run_classification_batch()   — clasifica mensajes nuevos con Haiku
-    2. reconstruct_recent_incidents() — actualiza incidentes
-    3. run_group_analysis_batch()   — análisis Sonnet de cada grupo
+- Cada hora (24/7, escaneando todos los timezones de los grupos):
+    1. run_classification_batch()       — clasifica mensajes nuevos con Haiku
+    2. reconstruct_recent_incidents()   — actualiza incidentes
+    3. run_group_analysis_batch()       — análisis Sonnet de cada grupo
+    4. run_due_briefings()              — genera briefing por grupo cuando
+                                          son las 06:xx en su zona horaria
 
 - A las 22:00 CDMX adicionalmente:
-    4. run_daily_batch()            — reporte ejecutivo del día + Slack
+    + run_daily_batch()                 — reporte ejecutivo del día + Slack
 """
 
 from __future__ import annotations
@@ -19,17 +21,20 @@ from datetime import datetime
 
 import pytz
 
+from woi_analyzer.churn_detector import scan_recent_messages as scan_churn_signals
 from woi_analyzer.classifier import run_classification_batch
 from woi_analyzer.config import CONFIG
 from woi_analyzer.daily_batch import run_daily_batch
 from woi_analyzer.group_analyst import run_group_analysis_batch
 from woi_analyzer.incident_reconstructor import reconstruct_recent_incidents, refresh_open_ticket_statuses
 from woi_analyzer.logging_setup import log
+from woi_analyzer.morning_briefing import run_due_briefings
 
 CDMX_TZ = pytz.timezone("America/Mexico_City")
-WORK_HOUR_START = 6   # 06:00 CDMX inclusive
-WORK_HOUR_END   = 22  # 22:00 CDMX inclusive (se ejecuta)
+WORK_HOUR_START = 6   # 06:00 CDMX inclusive (window where we still classify)
+WORK_HOUR_END   = 22  # 22:00 CDMX inclusive (window where we still classify)
 DAILY_HOUR      = 22  # hora en que además corre el daily batch
+BRIEFING_HOUR   = 6   # hora local de cada grupo en la que se dispara su briefing
 
 
 def _cdmx_hour() -> int:
@@ -70,7 +75,28 @@ def _run_hourly_cycle() -> None:
     except Exception as e:
         log.error("group_analysis_error", error=str(e))
 
-    # 4. Daily batch at DAILY_HOUR
+    # 3.5 Churn-risk keyword scan (last 4h client/operations messages)
+    try:
+        churn = scan_churn_signals(lookback_hours=4)
+        if churn.get("saved", 0) > 0:
+            log.info("churn_scan_done", **churn)
+    except Exception as e:
+        log.error("churn_scan_error", error=str(e))
+
+    # 4. Morning briefing — runs per-group at 06:xx local time of each group.
+    #    Since groups span MX/PE/CL/CO timezones, we check on every hourly tick.
+    try:
+        mb_results = run_due_briefings(briefing_hour=BRIEFING_HOUR)
+        if mb_results:
+            log.info(
+                "morning_briefing_batch_done",
+                generated=len(mb_results),
+                groups=[r.get("group") for r in mb_results],
+            )
+    except Exception as e:
+        log.error("morning_briefing_error", error=str(e))
+
+    # 5. Daily batch at DAILY_HOUR
     if _cdmx_hour() == DAILY_HOUR:
         try:
             daily = run_daily_batch()
@@ -101,19 +127,16 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     # Run once immediately on startup (don't wait for the next hour)
-    if _is_work_hour():
-        log.info("startup_run")
-        _run_hourly_cycle()
+    log.info("startup_run")
+    _run_hourly_cycle()
 
     while True:
         wait = _minutes_to_next_hour()
         log.info("sleeping_until_next_hour", seconds=round(wait))
         time.sleep(wait)
-
-        if _is_work_hour():
-            _run_hourly_cycle()
-        else:
-            log.info("outside_work_hours", cdmx_hour=_cdmx_hour())
+        # We always run the hourly cycle now (briefings can fire at 06:xx in
+        # any timezone, including outside CDMX work hours).
+        _run_hourly_cycle()
 
 
 if __name__ == "__main__":

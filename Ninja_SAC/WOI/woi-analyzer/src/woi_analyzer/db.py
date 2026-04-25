@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -731,6 +731,502 @@ def fetch_unanalyzed_media(limit: int = 50) -> list[dict[str, Any]]:
             (limit,),
         )
         return cur.fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Morning briefing — data gathering + persistence
+# ---------------------------------------------------------------------------
+
+def fetch_morning_briefing_input(
+    briefing_date: datetime,
+    group_id: int | None = None,
+    timezone_name: str | None = None,
+) -> dict[str, Any]:
+    """
+    Reúne todo el contexto necesario para que Sonnet genere el morning briefing.
+    `briefing_date` es la fecha local que el briefing va a CUBRIR (típicamente ayer).
+    `group_id` filtra todas las queries a un solo grupo (si es None, briefing global legacy).
+    `timezone_name` se usa para calcular el día local del grupo (si None, defaults a CDMX).
+    """
+    import pytz
+    tz = pytz.timezone(timezone_name or "America/Mexico_City")
+    base_local = briefing_date.astimezone(tz) if briefing_date.tzinfo else tz.localize(briefing_date)
+    day_start = tz.localize(base_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None))
+    day_end = tz.localize(base_local.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=None))
+
+    week_start = day_start - timedelta(days=7)
+    month_start = day_start - timedelta(days=30)
+
+    # Per-group filter snippet (applied wherever needed)
+    group_filter_msg = " AND m.group_id = %s" if group_id else ""
+    group_filter_inc = " AND i.group_id = %s" if group_id else ""
+    group_filter_inc_unprefixed = " AND group_id = %s" if group_id else ""
+
+    def _maybe_g(*existing: Any) -> tuple:
+        """Append group_id to params tuple if filtering by group."""
+        return (*existing, group_id) if group_id else existing
+
+    with connect() as conn, conn.cursor() as cur:
+        # ── Yesterday metrics ──────────────────────────────────────────────
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*)                                            AS total_messages,
+                ROUND(AVG(a.sentiment)::NUMERIC, 3)                 AS avg_sentiment
+            FROM messages m
+            LEFT JOIN analysis a ON a.message_id = m.id
+            WHERE m.timestamp BETWEEN %s AND %s
+              {group_filter_msg}
+            """,
+            _maybe_g(day_start, day_end),
+        )
+        msg_stats = cur.fetchone() or {}
+
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*)                                                            AS total_incidents,
+                COUNT(*) FILTER (WHERE closed_at BETWEEN %s AND %s)                 AS incidents_resolved,
+                COUNT(*) FILTER (WHERE escalated_at BETWEEN %s AND %s)              AS incidents_escalated,
+                ROUND(AVG(ttfr_seconds) FILTER (
+                    WHERE opened_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
+                ))::INT                                                              AS avg_ttfr_seconds
+            FROM incidents
+            WHERE (opened_at BETWEEN %s AND %s OR closed_at BETWEEN %s AND %s)
+              {group_filter_inc_unprefixed}
+            """,
+            _maybe_g(day_start, day_end, day_start, day_end, day_start, day_end,
+                     day_start, day_end, day_start, day_end),
+        )
+        inc_stats = cur.fetchone() or {}
+
+        # ── Incidents grouped by category yesterday ───────────────────────
+        cur.execute(
+            f"""
+            SELECT category, COUNT(*) AS count
+            FROM incidents
+            WHERE opened_at BETWEEN %s AND %s
+              AND category IS NOT NULL
+              {group_filter_inc_unprefixed}
+            GROUP BY category
+            ORDER BY count DESC
+            """,
+            _maybe_g(day_start, day_end),
+        )
+        incidents_by_category = cur.fetchall()
+
+        # ── Top open incidents (still open at briefing time) ──────────────
+        cur.execute(
+            f"""
+            SELECT i.id, g.name AS group_name, i.category, i.urgency,
+                   ROUND(EXTRACT(EPOCH FROM (NOW() - i.opened_at)) / 3600, 1) AS open_hours,
+                   COALESCE(i.summary, '') AS summary
+            FROM incidents i
+            JOIN groups g ON g.id = i.group_id
+            WHERE i.is_open = TRUE
+              {group_filter_inc}
+            ORDER BY CASE i.urgency WHEN 'alta' THEN 1 WHEN 'media' THEN 2 ELSE 3 END,
+                     i.opened_at ASC
+            LIMIT 10
+            """,
+            _maybe_g(),
+        )
+        top_open_incidents = cur.fetchall()
+
+        # ── Groups to watch (ratio B > 25% yesterday) ─────────────────────
+        # Skip when filtering by group: doesn't make sense per-group
+        if group_id is None:
+            cur.execute(
+                """
+                SELECT g.name AS group_name,
+                       COUNT(*) FILTER (WHERE a.bucket = 'B') AS count_b,
+                       ROUND(COUNT(*) FILTER (WHERE a.bucket = 'B')::NUMERIC
+                             / NULLIF(COUNT(*), 0) * 100, 1)  AS ratio_b_pct,
+                       ROUND(AVG(a.sentiment)::NUMERIC, 3)    AS sentiment_avg
+                FROM messages m
+                JOIN groups g ON g.id = m.group_id
+                JOIN analysis a ON a.message_id = m.id
+                WHERE m.timestamp BETWEEN %s AND %s
+                GROUP BY g.name
+                HAVING COUNT(*) FILTER (WHERE a.bucket = 'B')::NUMERIC
+                       / NULLIF(COUNT(*), 0) > 0.25
+                ORDER BY ratio_b_pct DESC
+                LIMIT 10
+                """,
+                (day_start, day_end),
+            )
+            groups_to_watch = cur.fetchall()
+        else:
+            groups_to_watch = []
+
+        # ── Recurring problems (same group + category, multiple times) ────
+        cur.execute(
+            f"""
+            WITH yesterday AS (
+                SELECT g.name AS group_name, i.category, COUNT(*) AS cnt
+                FROM incidents i
+                JOIN groups g ON g.id = i.group_id
+                WHERE i.opened_at BETWEEN %s AND %s
+                  AND i.category IS NOT NULL
+                  {group_filter_inc}
+                GROUP BY g.name, i.category
+            ),
+            week AS (
+                SELECT g.name AS group_name, i.category, COUNT(*) AS cnt
+                FROM incidents i
+                JOIN groups g ON g.id = i.group_id
+                WHERE i.opened_at BETWEEN %s AND %s
+                  AND i.category IS NOT NULL
+                  {group_filter_inc}
+                GROUP BY g.name, i.category
+            ),
+            month AS (
+                SELECT g.name AS group_name, i.category, COUNT(*) AS cnt
+                FROM incidents i
+                JOIN groups g ON g.id = i.group_id
+                WHERE i.opened_at BETWEEN %s AND %s
+                  AND i.category IS NOT NULL
+                  {group_filter_inc}
+                GROUP BY g.name, i.category
+            )
+            SELECT y.group_name, y.category,
+                   y.cnt          AS count_yesterday,
+                   COALESCE(w.cnt, 0) AS count_7d,
+                   COALESCE(mo.cnt, 0) AS count_30d
+            FROM yesterday y
+            LEFT JOIN week  w  ON w.group_name = y.group_name AND w.category = y.category
+            LEFT JOIN month mo ON mo.group_name = y.group_name AND mo.category = y.category
+            ORDER BY count_30d DESC, count_yesterday DESC
+            LIMIT 15
+            """,
+            (
+                day_start, day_end, *((group_id,) if group_id else ()),
+                week_start, day_end, *((group_id,) if group_id else ()),
+                month_start, day_end, *((group_id,) if group_id else ()),
+            ),
+        )
+        recurring_problems = cur.fetchall()
+
+        # ── Agents in red zone yesterday ──────────────────────────────────
+        cur.execute(
+            f"""
+            SELECT i.first_response_by AS agent_phone,
+                   COALESCE(p.display_name, i.first_response_by) AS agent_name,
+                   COUNT(*) AS incidents_attended,
+                   ROUND(AVG(i.ttfr_seconds)::NUMERIC / 60, 1) AS avg_ttfr_min
+            FROM incidents i
+            LEFT JOIN participants p
+                   ON p.phone = i.first_response_by AND p.group_id = i.group_id
+            WHERE i.opened_at BETWEEN %s AND %s
+              AND i.first_response_by IS NOT NULL
+              AND i.ttfr_seconds IS NOT NULL
+              {group_filter_inc}
+            GROUP BY i.first_response_by, p.display_name
+            HAVING AVG(i.ttfr_seconds) > 1800
+            ORDER BY avg_ttfr_min DESC
+            LIMIT 6
+            """,
+            _maybe_g(day_start, day_end),
+        )
+        agents_red_zone = cur.fetchall()
+
+        # ── Weekly + monthly context ──────────────────────────────────────
+        cur.execute(
+            f"""
+            SELECT
+                COUNT(*) FILTER (WHERE opened_at BETWEEN %s AND %s
+                                 {group_filter_inc_unprefixed.replace('AND group_id', 'AND incidents.group_id') if group_id else ''})  AS incidents_7d,
+                COUNT(*) FILTER (WHERE opened_at BETWEEN %s AND %s
+                                 {group_filter_inc_unprefixed.replace('AND group_id', 'AND incidents.group_id') if group_id else ''})  AS incidents_30d,
+                ROUND(AVG(ttfr_seconds) FILTER (
+                    WHERE opened_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
+                    {group_filter_inc_unprefixed.replace('AND group_id', 'AND incidents.group_id') if group_id else ''}
+                ))::INT / 60                                            AS ttfr_7d_min
+            FROM incidents
+            """,
+            (
+                week_start, day_end, *((group_id,) if group_id else ()),
+                month_start, day_end, *((group_id,) if group_id else ()),
+                week_start, day_end, *((group_id,) if group_id else ()),
+            ),
+        )
+        ctx_inc = cur.fetchone() or {}
+
+        cur.execute(
+            f"""
+            SELECT
+                ROUND(AVG(a.sentiment) FILTER (WHERE m.timestamp BETWEEN %s AND %s)::NUMERIC, 3) AS avg_sentiment_7d,
+                ROUND(AVG(a.sentiment) FILTER (WHERE m.timestamp BETWEEN %s AND %s)::NUMERIC, 3) AS avg_sentiment_30d
+            FROM messages m
+            JOIN analysis a ON a.message_id = m.id
+            WHERE 1=1 {group_filter_msg}
+            """,
+            (
+                week_start, day_end,
+                month_start, day_end,
+                *((group_id,) if group_id else ()),
+            ),
+        )
+        ctx_sent = cur.fetchone() or {}
+
+        # ── Churn signals: client messages with very negative sentiment ───
+        cur.execute(
+            f"""
+            SELECT g.name AS group_name,
+                   m.content AS quote,
+                   m.sender_role,
+                   m.sender_display_name,
+                   m.timestamp,
+                   a.sentiment,
+                   a.urgency,
+                   a.category
+            FROM messages m
+            JOIN groups g ON g.id = m.group_id
+            JOIN analysis a ON a.message_id = m.id
+            WHERE m.timestamp BETWEEN %s AND %s
+              AND m.content IS NOT NULL
+              AND LENGTH(m.content) BETWEEN 15 AND 600
+              AND m.sender_role IN ('cliente', 'otro')
+              AND (a.sentiment <= -0.5 OR a.urgency = 'alta')
+              {group_filter_msg}
+            ORDER BY a.sentiment ASC NULLS LAST
+            LIMIT 25
+            """,
+            _maybe_g(day_start, day_end),
+        )
+        churn_candidates = cur.fetchall()
+
+        # ── Group context (when filtering by group) ───────────────────────
+        group_ctx: dict[str, Any] = {}
+        if group_id is not None:
+            cur.execute(
+                "SELECT id, name, country, timezone FROM groups WHERE id = %s",
+                (group_id,),
+            )
+            g_row = cur.fetchone()
+            if g_row:
+                group_ctx = dict(g_row)
+
+    return {
+        "date": briefing_date.strftime("%Y-%m-%d"),
+        "scope": "group" if group_id else "global",
+        "group": group_ctx if group_ctx else None,
+        "yesterday_metrics": {
+            "total_messages":      msg_stats.get("total_messages") or 0,
+            "total_incidents":     inc_stats.get("total_incidents") or 0,
+            "incidents_resolved":  inc_stats.get("incidents_resolved") or 0,
+            "incidents_escalated": inc_stats.get("incidents_escalated") or 0,
+            "avg_ttfr_seconds":    inc_stats.get("avg_ttfr_seconds"),
+            "avg_sentiment":       float(msg_stats["avg_sentiment"]) if msg_stats.get("avg_sentiment") is not None else None,
+        },
+        "incidents_by_category": [dict(r) for r in incidents_by_category],
+        "top_open_incidents":    [dict(r) for r in top_open_incidents],
+        "groups_to_watch":       [dict(r) for r in groups_to_watch],
+        "recurring_problems":    [dict(r) for r in recurring_problems],
+        "agents_red_zone":       [dict(r) for r in agents_red_zone],
+        "weekly_context": {
+            "incidents_7d":      ctx_inc.get("incidents_7d") or 0,
+            "incidents_30d":     ctx_inc.get("incidents_30d") or 0,
+            "ttfr_7d_min":       ctx_inc.get("ttfr_7d_min"),
+            "avg_sentiment_7d":  float(ctx_sent["avg_sentiment_7d"])  if ctx_sent.get("avg_sentiment_7d")  is not None else None,
+            "avg_sentiment_30d": float(ctx_sent["avg_sentiment_30d"]) if ctx_sent.get("avg_sentiment_30d") is not None else None,
+        },
+        "churn_candidates": [dict(r) for r in churn_candidates],
+    }
+
+
+def briefing_exists(briefing_date, group_id: int | None) -> bool:
+    """Return True if a briefing for (date, group_id) already exists."""
+    bd = briefing_date.date() if isinstance(briefing_date, datetime) else briefing_date
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM morning_briefings
+            WHERE briefing_date = %s
+              AND COALESCE(group_id, 0) = COALESCE(%s, 0)
+            LIMIT 1
+            """,
+            (bd, group_id),
+        )
+        return cur.fetchone() is not None
+
+
+def insert_morning_briefing(
+    *,
+    briefing_date: datetime,
+    metrics: dict[str, Any],
+    headline: str,
+    briefing_json: dict[str, Any],
+    briefing_markdown: str,
+    claude_model: str,
+    input_tokens: int,
+    output_tokens: int,
+    group_id: int | None = None,
+    timezone_name: str | None = None,
+) -> int:
+    """Insert/upsert a briefing for (briefing_date, group_id)."""
+    bd = briefing_date.date() if isinstance(briefing_date, datetime) else briefing_date
+
+    with connect() as conn, conn.cursor() as cur:
+        # We can't use ON CONFLICT with the partial-coalesce index, so do
+        # an explicit "delete-and-insert" inside a tx.
+        cur.execute(
+            """
+            DELETE FROM morning_briefings
+            WHERE briefing_date = %s
+              AND COALESCE(group_id, 0) = COALESCE(%s, 0)
+            """,
+            (bd, group_id),
+        )
+        cur.execute(
+            """
+            INSERT INTO morning_briefings (
+                briefing_date, group_id, timezone,
+                total_messages, total_incidents, incidents_resolved, incidents_escalated,
+                avg_ttfr_seconds, avg_sentiment,
+                headline, briefing_json, briefing_markdown,
+                claude_model, input_tokens, output_tokens
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+            """,
+            (
+                bd,
+                group_id,
+                timezone_name,
+                metrics.get("total_messages") or 0,
+                metrics.get("total_incidents") or 0,
+                metrics.get("incidents_resolved") or 0,
+                metrics.get("incidents_escalated") or 0,
+                metrics.get("avg_ttfr_seconds"),
+                metrics.get("avg_sentiment"),
+                headline,
+                json.dumps(briefing_json, ensure_ascii=False, default=str),
+                briefing_markdown,
+                claude_model,
+                input_tokens,
+                output_tokens,
+            ),
+        )
+        row = cur.fetchone()
+        conn.commit()
+    return row["id"] if row else -1
+
+
+def list_active_groups_with_timezones() -> list[dict[str, Any]]:
+    """Return active groups with id, name, country, timezone (normalized)."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, country,
+                   COALESCE(timezone,
+                            CASE country
+                              WHEN 'MX' THEN 'America/Mexico_City'
+                              WHEN 'PE' THEN 'America/Lima'
+                              WHEN 'CL' THEN 'America/Santiago'
+                              WHEN 'CO' THEN 'America/Bogota'
+                              WHEN 'AR' THEN 'America/Argentina/Buenos_Aires'
+                              WHEN 'BR' THEN 'America/Sao_Paulo'
+                              ELSE 'America/Mexico_City'
+                            END
+                   ) AS timezone
+            FROM groups
+            WHERE is_active = TRUE
+            ORDER BY country, name
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def insert_churn_signal(
+    *,
+    group_id: int,
+    message_id: int | None,
+    severity: str,
+    source: str,
+    quote: str,
+    matched_keyword: str | None,
+    confidence: float | None,
+    context: str | None,
+    sender_phone: str | None,
+    sender_display_name: str | None,
+    sender_role: str | None,
+    incident_id: int | None = None,
+) -> int:
+    """
+    Insert a churn-risk signal. Idempotent thanks to the
+    `(COALESCE(message_id,0), severity, source)` unique index — duplicates
+    return the existing row id (-1 if conflict and no row returned).
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO churn_signals (
+                group_id, message_id, incident_id,
+                severity, confidence, source,
+                quote, context, matched_keyword,
+                sender_phone, sender_display_name, sender_role
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (COALESCE(message_id, 0), severity, source, md5(LEFT(quote, 240))) DO NOTHING
+            RETURNING id
+            """,
+            (
+                group_id, message_id, incident_id,
+                severity, confidence, source,
+                quote, context, matched_keyword,
+                sender_phone, sender_display_name, sender_role,
+            ),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row["id"] if row else -1
+
+
+def list_open_churn_signals(
+    *, group_id: int | None = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    """List unresolved churn signals, newest first."""
+    sql = """
+        SELECT cs.id, cs.group_id, g.name AS group_name, g.country AS group_country,
+               cs.message_id, cs.incident_id,
+               cs.detected_at, cs.severity, cs.confidence, cs.source,
+               cs.quote, cs.context, cs.matched_keyword,
+               cs.sender_phone, cs.sender_display_name, cs.sender_role,
+               cs.resolved_at, cs.resolved_by, cs.resolution_note,
+               m.timestamp AS message_timestamp
+        FROM churn_signals cs
+        LEFT JOIN groups   g ON g.id = cs.group_id
+        LEFT JOIN messages m ON m.id = cs.message_id
+        WHERE cs.resolved_at IS NULL
+    """
+    args: list[Any] = []
+    if group_id is not None:
+        sql += " AND cs.group_id = %s"
+        args.append(group_id)
+    sql += " ORDER BY cs.detected_at DESC LIMIT %s"
+    args.append(limit)
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, args)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def resolve_churn_signal(
+    *, signal_id: int, resolved_by: str = "manual", note: str | None = None
+) -> bool:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE churn_signals
+               SET resolved_at = NOW(),
+                   resolved_by = %s,
+                   resolution_note = %s
+             WHERE id = %s AND resolved_at IS NULL
+            RETURNING id
+            """,
+            (resolved_by, note, signal_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row is not None
 
 
 def insert_media_analysis(
