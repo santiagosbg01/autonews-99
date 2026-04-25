@@ -65,6 +65,42 @@ Return ONLY valid JSON matching exactly this schema, no markdown, no prose:
    - `media`: problema operativo en curso que requiere acción pronto.
    - `baja`: reporte rutinario, consulta, saludo, evento positivo.
 
+# Emoji and reaction signals — weight these heavily
+
+## Emojis in message text
+Emojis are strong sentiment and urgency signals in LATAM WhatsApp operations. Treat them with HIGH weight:
+
+**Urgent / negative emojis** (push sentiment toward -0.6 to -1.0, urgency to `alta`):
+- 🚨🆘🔴⛔🚫❌💔😡🤬😤👊🖕😱😰⚠️🔥 (when used negatively, e.g., "🚨🚨 la unidad no llega")
+
+**Problem / medium negative** (sentiment -0.3 to -0.7, urgency `media`):
+- 😞😢😟🤔❓❗😔⏰⏱️🐢 (delays, confusion, frustration)
+
+**Neutral / acknowledgment** (sentiment around 0.0):
+- 👀🙄😑🤷 (waiting, indifferent)
+
+**Positive / resolution** (push sentiment toward +0.3 to +0.8):
+- ✅✔️👍👌🙏❤️💪💯🎉🥳😊😄🎊⭐🌟 (confirmed, resolved, grateful)
+
+**Very positive** (sentiment +0.7 to +1.0):
+- ❤️🥰😍💖🤩 (strong satisfaction)
+
+## Reaction messages (media_type = "reaction")
+A reaction is a single emoji sent as a reaction to another message.
+- Classify as `acuse_recibo` (bucket C) — it's a quick acknowledgment
+- Use the emoji to set sentiment:
+  - 👍✅❤️🔥💪😊🎉 → sentiment +0.4 to +0.7, is_incident_close=false
+  - 👎❌😡😤💔🙁 → sentiment -0.5 to -0.8
+  - 👀🤔😮 → sentiment 0.0 to -0.1
+- is_incident_open=false, is_incident_close=false (reactions don't open/close incidents)
+- urgency=`baja` always for reactions
+
+## Standalone emoji messages (content is ONLY emojis, no text)
+- Single 👍 or ✅: `acuse_recibo`, sentiment +0.3
+- Single ❌ or 👎: negative `acuse_recibo`, sentiment -0.5
+- 🚨🚨🚨 (repeated alarm emojis): `problema_unidad` or appropriate B category, urgency alta, sentiment -0.8
+- ❤️ or 🙏: `saludo_ruido`, sentiment +0.6
+
 # Examples of edge cases
 
 - "Listo, recibimos las 5 cajas" del cliente → `confirmacion_resolucion`, bucket C, is_incident_close=true
@@ -74,3 +110,7 @@ Return ONLY valid JSON matching exactly this schema, no markdown, no prose:
 - "Adjunto foto de evidencia" + imagen → `confirmacion_evidencias`, bucket A
 - Sticker de buenos días sin texto → `saludo_ruido`, bucket C
 - "Hay manifestación en Periférico sur" del agente → `problema_manifestacion`, bucket B, urgency=media
+- Reaction emoji "👍" to a message → `acuse_recibo`, bucket C, sentiment +0.5, urgency baja
+- Reaction emoji "😡" → `acuse_recibo`, bucket C, sentiment -0.7, urgency baja
+- "🚨🚨 URGENTE el chofer no aparece" → `problema_unidad`, bucket B, urgency alta, sentiment -0.9
+- "✅ Todo listo, se cargó completo" → `confirmacion_salida`, bucket A, sentiment +0.7, is_incident_close=true

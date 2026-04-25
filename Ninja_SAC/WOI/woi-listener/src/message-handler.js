@@ -52,6 +52,15 @@ function extractContent(message) {
   if (message.contactMessage) {
     return { content: '[contact]', mediaType: 'contact', mediaDurationSec: null };
   }
+  if (message.reactionMessage) {
+    // Emoji reaction to a specific message — store emoji as content, target msg id as reply_to
+    return {
+      content: message.reactionMessage.text || null,
+      mediaType: 'reaction',
+      mediaDurationSec: null,
+      reactionTargetId: message.reactionMessage.key?.id ?? null,
+    };
+  }
   return { content: null, mediaType: 'unknown', mediaDurationSec: null };
 }
 
@@ -122,8 +131,12 @@ export async function handleIncomingMessages(m, sock) {
       });
 
       // 3) extract content + insert message
-      const { content, mediaType, mediaDurationSec } = extractContent(msg.message);
-      const replyTo = extractReplyTo(msg.message);
+      const { content, mediaType, mediaDurationSec, reactionTargetId } = extractContent(msg.message);
+
+      // Skip reactions with no emoji (e.g. reaction removed)
+      if (mediaType === 'reaction' && !content) continue;
+
+      const replyTo = reactionTargetId ?? extractReplyTo(msg.message);
 
       const inserted = await insertMessage({
         whatsapp_msg_id: whatsappMsgId,

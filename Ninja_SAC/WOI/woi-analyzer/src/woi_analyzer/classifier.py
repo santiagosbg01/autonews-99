@@ -15,6 +15,7 @@ from woi_analyzer.db import (
     mark_messages_analyzed,
     upsert_analysis,
 )
+from woi_analyzer.emoji_sentiment import emoji_sentiment_adjustment
 from woi_analyzer.logging_setup import log
 
 
@@ -53,12 +54,30 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
         return False, None
 
     model_used = CONFIG.anthropic.sonnet_model
+
+    # Apply emoji/reaction sentiment adjustment as a safety net
+    content = msg.content or (f"[{msg.media_type}]" if msg.media_type else None)
+    adj_sentiment, urgency_override = emoji_sentiment_adjustment(
+        content=content,
+        media_type=msg.media_type,
+        claude_sentiment=result.sentiment,
+    )
+    final_urgency = urgency_override or result.urgency
+    if adj_sentiment != result.sentiment or urgency_override:
+        log.debug(
+            "emoji_adjustment",
+            msg_id=msg.id,
+            original_sent=result.sentiment,
+            adj_sent=adj_sentiment,
+            urgency_override=urgency_override,
+        )
+
     upsert_analysis(
         message_id=msg.id,
         category=result.category,
         bucket=result.bucket,
-        sentiment=result.sentiment,
-        urgency=result.urgency,
+        sentiment=adj_sentiment,
+        urgency=final_urgency,
         is_incident_open=result.is_incident_open,
         is_incident_close=result.is_incident_close,
         claude_model=model_used,
