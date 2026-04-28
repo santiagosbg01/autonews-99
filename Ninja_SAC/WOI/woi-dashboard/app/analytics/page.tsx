@@ -686,7 +686,7 @@ export default async function AnalyticsPage({
               Correcciones de clasificación
             </h2>
             <p style={{ fontSize: 12, color: '#64748b', margin: '4px 0 0' }}>
-              Feedback humano sobre lo que Sonnet/Haiku clasificó —
+              Feedback humano sobre lo que Sonnet clasificó —
               {feedbackCounts.last_submitted_at
                 ? ` última hace ${(() => {
                     const ms = Date.now() - new Date(feedbackCounts.last_submitted_at).getTime()

@@ -55,8 +55,6 @@ def write_report(
     agents_leaderboard: list[dict],
     groups_health: list[dict],
     raw_sample: list[dict],
-    diffs: list[dict],
-    consistency: dict,
     narrative: str,
 ) -> str:
     """Escribe todos los tabs y devuelve la URL del sheet."""
@@ -76,10 +74,6 @@ def write_report(
             ["Bucket C (conversacional)", overview.get("count_c", 0)],
             ["Ratio B (%)", _fmt_number(overview.get("ratio_b_pct"))],
             ["Sentiment avg", _fmt_number(overview.get("sentiment_avg"))],
-            [],
-            ["Consistencia Haiku↔Sonnet (%)", _fmt_number(consistency.get("consistency_pct"))],
-            ["  N muestras ground-truth", consistency.get("sample_size", 0)],
-            ["  Match a nivel bucket (%)", _fmt_number(consistency.get("bucket_match_pct"))],
             [],
             ["— Narrativa (Sonnet) —"],
             [narrative or "(no narrative generated)"],
@@ -162,7 +156,7 @@ def write_report(
     ws = _get_or_create_worksheet(sheet, f"RawSample_{date_str}", rows=50, cols=12)
     header = [
         "MsgID", "Grupo", "Timestamp", "Rol", "Autor", "Mensaje",
-        "Categoría (Haiku)", "Bucket", "Sentiment", "Urgencia", "Razonamiento",
+        "Categoría (Sonnet)", "Bucket", "Sentiment", "Urgencia", "Razonamiento",
         "Santi OK/NOK/recategorizar →",
     ]
     rows = [header]
@@ -184,28 +178,5 @@ def write_report(
     ws.update(rows, range_name="A1")
     ws.format("A1:L1", {"textFormat": {"bold": True}})
     ws.format("L2:L50", {"backgroundColor": {"red": 1.0, "green": 0.98, "blue": 0.85}})
-
-    # ---- TAB: Haiku_vs_Sonnet_Diffs ----
-    ws = _get_or_create_worksheet(sheet, f"Diffs_{date_str}", rows=50, cols=10)
-    header = [
-        "MsgID", "Grupo", "Rol", "Mensaje", "Haiku cat", "Haiku bucket",
-        "Sonnet cat", "Sonnet bucket", "Sonnet reasoning", "Santi: cuál es correcto?",
-    ]
-    rows = [header]
-    for d in diffs:
-        rows.append([
-            d.get("message_id"),
-            d.get("group_name"),
-            d.get("sender_role"),
-            (d.get("content") or "")[:200],
-            d.get("haiku_category"),
-            d.get("haiku_bucket"),
-            d.get("sonnet_category"),
-            d.get("sonnet_bucket"),
-            (d.get("sonnet_reasoning") or "")[:150],
-            "",
-        ])
-    ws.update(rows, range_name="A1")
-    ws.format("A1:J1", {"textFormat": {"bold": True}})
 
     return sheet.url

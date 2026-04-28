@@ -7,7 +7,7 @@
 ## Proceso
 
 1. Dejar correr listener 7-10 días en 1-2 grupos internos activos.
-2. Clasificar todos los mensajes con Haiku (pipeline normal).
+2. Clasificar todos los mensajes con Sonnet (pipeline normal).
 3. Exportar ~500 mensajes a un JSON plano con `scripts/export_sample.py`.
 4. Santi o Ops labeler revisa manualmente y agrupa en **ground-truth incidents** vía spreadsheet.
 5. Correr `scripts/evaluate_heuristic.py` que compara output del heurístico vs ground-truth manual.

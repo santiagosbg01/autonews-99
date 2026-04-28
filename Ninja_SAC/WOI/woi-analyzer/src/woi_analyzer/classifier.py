@@ -1,8 +1,7 @@
-"""Orquestador de clasificación Haiku + ground-truth Sonnet + persistencia."""
+"""Orquestador de clasificación con Sonnet + persistencia."""
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from woi_analyzer.claude_client import classify_message
@@ -11,7 +10,6 @@ from woi_analyzer.db import (
     MessageRow,
     fetch_context_messages,
     fetch_unanalyzed_messages,
-    insert_ground_truth_sample,
     mark_messages_analyzed,
     upsert_analysis,
 )
@@ -23,14 +21,10 @@ from woi_analyzer.logging_setup import log
 class BatchResult:
     processed: int
     failed: int
-    ground_truth_sampled: int
 
 
-def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
-    """
-    Clasifica con Haiku y persiste a analysis.
-    Devuelve (success, haiku_payload_dict_for_groundtruth).
-    """
+def _classify_and_persist(msg: MessageRow) -> bool:
+    """Clasifica el mensaje con Sonnet y persiste en `analysis`. Devuelve éxito."""
     context = fetch_context_messages(
         group_id=msg.group_id,
         before=msg.timestamp,
@@ -47,18 +41,15 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
             timestamp=msg.timestamp.isoformat(),
             context_messages=context,
             message_content=content,
-            use_sonnet=True,
         )
     except Exception as e:
         log.error("classify_failed", msg_id=msg.id, error=str(e))
-        return False, None
-
-    model_used = CONFIG.anthropic.sonnet_model
+        return False
 
     # Apply emoji/reaction sentiment adjustment as a safety net
-    content = msg.content or (f"[{msg.media_type}]" if msg.media_type else None)
+    adjustable_content = msg.content or (f"[{msg.media_type}]" if msg.media_type else None)
     adj_sentiment, urgency_override = emoji_sentiment_adjustment(
-        content=content,
+        content=adjustable_content,
         media_type=msg.media_type,
         claude_sentiment=result.sentiment,
     )
@@ -80,85 +71,34 @@ def _classify_and_persist(msg: MessageRow) -> tuple[bool, dict | None]:
         urgency=final_urgency,
         is_incident_open=result.is_incident_open,
         is_incident_close=result.is_incident_close,
-        claude_model=model_used,
+        claude_model=CONFIG.anthropic.sonnet_model,
         claude_usage=usage,
         claude_raw=raw,
         reasoning=result.reasoning,
-    )
-    return True, {
-        "category": result.category,
-        "bucket": result.bucket,
-        "sentiment": result.sentiment,
-        "context": context,
-    }
-
-
-def _sample_with_sonnet(msg: MessageRow, haiku_payload: dict) -> bool:
-    """Clasifica con Sonnet para crear una ground_truth_sample."""
-    content = msg.content or (f"[{msg.media_type}]" if msg.media_type else "[media]")
-    try:
-        result, _raw, _usage = classify_message(
-            group_name=msg.group_name,
-            country=msg.group_country or "MX",
-            timezone=msg.group_timezone,
-            sender_role=msg.sender_role or "otro",
-            sender_phone=msg.sender_phone,
-            timestamp=msg.timestamp.isoformat(),
-            context_messages=haiku_payload["context"],
-            message_content=content,
-            use_sonnet=True,
-        )
-    except Exception as e:
-        log.warning("sonnet_groundtruth_failed", msg_id=msg.id, error=str(e))
-        return False
-
-    insert_ground_truth_sample(
-        message_id=msg.id,
-        sonnet_category=result.category,
-        sonnet_bucket=result.bucket,
-        sonnet_sentiment=result.sentiment,
-        sonnet_urgency=result.urgency,
-        sonnet_reasoning=result.reasoning,
-        sonnet_model=CONFIG.anthropic.sonnet_model,
-        haiku_category=haiku_payload["category"],
-        haiku_bucket=haiku_payload["bucket"],
-        haiku_sentiment=haiku_payload["sentiment"],
     )
     return True
 
 
 def run_classification_batch(limit: int | None = None, group_name: str | None = None) -> BatchResult:
     """
-    Clasifica todos los mensajes unanalyzed. Muestrea N aleatorios para Sonnet ground-truth.
+    Clasifica todos los mensajes `analyzed=false` con Sonnet.
     Opcionalmente filtra por nombre de grupo (parcial, case-insensitive).
     """
     messages = fetch_unanalyzed_messages(limit=limit, group_name=group_name)
     if not messages:
         log.info("no_unanalyzed_messages")
-        return BatchResult(processed=0, failed=0, ground_truth_sampled=0)
+        return BatchResult(processed=0, failed=0)
 
     log.info("batch_start", count=len(messages))
 
-    sample_size = (
-        min(CONFIG.analyzer.ground_truth_daily_sample, len(messages))
-        if CONFIG.analyzer.feature_ground_truth
-        else 0
-    )
-    sample_ids = set(random.sample([m.id for m in messages], sample_size)) if sample_size > 0 else set()
-
     processed = 0
     failed = 0
-    gt_sampled = 0
     pending_ids: list[int] = []
 
     for i, msg in enumerate(messages, start=1):
-        ok, haiku_payload = _classify_and_persist(msg)
-        if ok:
+        if _classify_and_persist(msg):
             processed += 1
             pending_ids.append(msg.id)
-            if msg.id in sample_ids and haiku_payload is not None:
-                if _sample_with_sonnet(msg, haiku_payload):
-                    gt_sampled += 1
         else:
             failed += 1
 
@@ -168,9 +108,8 @@ def run_classification_batch(limit: int | None = None, group_name: str | None = 
             pending_ids = []
             log.info("batch_progress", done=i, total=len(messages), failed=failed)
 
-    # Flush any remaining
     if pending_ids:
         mark_messages_analyzed(pending_ids)
 
-    log.info("batch_done", processed=processed, failed=failed, ground_truth_sampled=gt_sampled)
-    return BatchResult(processed=processed, failed=failed, ground_truth_sampled=gt_sampled)
+    log.info("batch_done", processed=processed, failed=failed)
+    return BatchResult(processed=processed, failed=failed)

@@ -30,8 +30,6 @@ You will receive:
 **Agentes en zona roja:**
 - <agent_name> — <count> incidencias atendidas, TTFR avg <mins>min
 
-**Consistencia Haiku↔Sonnet:** <pct>% (N=<sample_size>)
-
 **Notas del día:**
 - <observación puntual si la hay, máximo 3 bullets; si no hay nada relevante, omitir esta sección>
 ```

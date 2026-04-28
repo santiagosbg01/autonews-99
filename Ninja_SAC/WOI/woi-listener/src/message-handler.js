@@ -77,11 +77,37 @@ function extractReplyTo(message) {
 }
 
 /**
- * Normaliza JID de WhatsApp (participant) a E.164 sin '+'.
+ * Normaliza JID telefónico de WhatsApp (`<phone>@s.whatsapp.net`) a E.164 sin '+'.
+ * Devuelve null para JIDs anónimos (`@lid`) o cualquier otro tipo.
  */
-function jidToPhone(jid) {
+function phoneJidToE164(jid) {
   if (!jid) return null;
+  if (!jid.includes('@s.whatsapp.net')) return null;
   return jid.split('@')[0].split(':')[0];
+}
+
+/**
+ * Resuelve el teléfono real del sender en grupos lid-mode.
+ *
+ * En grupos modernos (`addressingMode: 'lid'`) `msg.key.participant` puede
+ * venir como `<lid>@lid`. WhatsApp incluye en paralelo:
+ *   msg.key.participantPn  → `<phone>@s.whatsapp.net`  (teléfono real)
+ *   msg.key.participantLid → `<lid>@lid`               (LID anónimo)
+ *
+ * Preferimos siempre el teléfono. Si no está disponible, devolvemos null
+ * (mejor saltar el mensaje que persistir un LID confundible con un E.164).
+ */
+function resolveSenderPhone(msg) {
+  const candidates = [
+    msg.key?.participantPn,
+    msg.key?.participant,
+    msg.participant
+  ];
+  for (const jid of candidates) {
+    const phone = phoneJidToE164(jid);
+    if (phone) return phone;
+  }
+  return null;
 }
 
 /**
@@ -104,10 +130,19 @@ export async function handleIncomingMessages(m, sock) {
       if (!msg.key.remoteJid?.endsWith('@g.us')) continue;   // Solo grupos
 
       const groupJid = msg.key.remoteJid;
-      const senderJid = msg.key.participant ?? msg.participant ?? null;
-      if (!senderJid) continue;
-
-      const senderPhone = jidToPhone(senderJid);
+      const senderPhone = resolveSenderPhone(msg);
+      if (!senderPhone) {
+        logger.debug(
+          {
+            msgId: msg.key.id,
+            groupJid,
+            participant: msg.key.participant,
+            participantPn: msg.key.participantPn
+          },
+          'Skipping message without resolvable phone (likely lid-only sender)'
+        );
+        continue;
+      }
       const whatsappMsgId = msg.key.id;
       const timestamp = new Date((msg.messageTimestamp ?? Date.now() / 1000) * 1000);
 
@@ -197,10 +232,27 @@ export async function handleGroupParticipantsUpdate(update, sock) {
     logger.info({ groupName, action, count: participantJids.length }, 'Group participants updated');
 
     if (action === 'add' || action === 'promote') {
+      // Cuando llega un add/promote sólo conocemos el JID que mandó el evento.
+      // En grupos lid-mode puede ser un @lid; en ese caso no podemos saber el
+      // teléfono real sin pedir el roster, así que recargamos metadata y
+      // upserteamos al participante usando la entrada con `.jid` de ahí.
+      const lookup = new Map();
+      for (const p of md?.participants ?? []) {
+        const jid = phoneJidToE164(p.jid) ?? phoneJidToE164(p.id);
+        if (!jid) continue;
+        lookup.set(p.id, jid);
+        if (p.lid) lookup.set(p.lid, jid);
+      }
+
       for (const jid of participantJids) {
+        const phone = lookup.get(jid) ?? phoneJidToE164(jid);
+        if (!phone) {
+          logger.debug({ jid, groupName }, 'Cannot resolve phone for new participant; skipping');
+          continue;
+        }
         await upsertParticipant({
           groupId: group.id,
-          phone: jidToPhone(jid),
+          phone,
           displayName: null
         });
       }

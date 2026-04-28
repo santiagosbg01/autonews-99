@@ -24,9 +24,9 @@
   - [ ] Crear bucket privado `woi-auth-backup` en Storage
   - [ ] Copiar `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL` al `.env`
 - [ ] **Anthropic**: crear API key en console.anthropic.com
-  - [ ] Confirmar slugs exactos de modelos disponibles hoy (Haiku 4.5 / Sonnet latest)
-  - [ ] Ajustar `CLAUDE_HAIKU_MODEL` y `CLAUDE_SONNET_MODEL` en `.env` si cambiaron
-  - [ ] Setear presupuesto/alerta en ~$80/mes
+  - [ ] Confirmar slug exacto de Sonnet disponible hoy (todo el pipeline corre solo con Sonnet)
+  - [ ] Ajustar `CLAUDE_SONNET_MODEL` en `.env` si Anthropic publicó una versión nueva
+  - [ ] Setear presupuesto/alerta en ~$200/mes (volumen Sonnet-only es mayor que el approach Haiku+Sonnet original)
 - [ ] **Slack**:
   - [ ] Crear Slack App con Incoming Webhook (o usar uno existente)
   - [ ] Generar webhook para DM Santi o canal privado `#woi-daily`
@@ -110,7 +110,7 @@
 
 - [ ] **Smoke test end-to-end automatizado** (`tests/e2e_smoke.py`): script que inserta fixtures de mensajes, corre analyzer + reporter, y verifica que llega Slack + Sheet tiene data. Útil antes de onboardar grupo #2.
 - [ ] **Ingesta del feedback Sheet → `classification_feedback`**: un pequeño script que lee las columnas donde Santi marca OK/NOK/recategorizar y persiste a Supabase para alimentar el loop semanal de few-shot. Versión V1.5, no bloquea lanzamiento.
-- [ ] **Prompt tuning después de semana 2**: si consistencia Haiku↔Sonnet <70%, analizar los `Diffs_*` y añadir 5-10 few-shots nuevos específicos de los errores recurrentes.
+- [ ] **Prompt tuning después de semana 2**: si el spot-check humano sobre `RawSample_*` muestra accuracy <85%, analizar los errores recurrentes y añadir 5-10 few-shots nuevos al prompt de Sonnet.
 - [ ] **Plan B VPS (Hetzner)**: `docs/migration-to-vps.md` queda sin escribir. Solo crear si el Mac Mini falla por razones operativas o físicas.
 - [ ] **Google Sheet de feedback separado** (`GOOGLE_SHEETS_FEEDBACK_ID` en `.env.example`): queda sin usar en V1. Opcional en V1.5.
 

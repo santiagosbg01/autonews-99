@@ -35,20 +35,19 @@ woi-report run
 woi-report run --for-date 2026-04-15
 ```
 
-## Tabs que genera en el Sheet (6 tabs por día)
+## Tabs que genera en el Sheet (5 tabs por día)
 
 | Tab | Contenido |
 |---|---|
-| `Overview_YYYY-MM-DD` | KPIs + narrativa Sonnet + consistencia Haiku↔Sonnet |
+| `Overview_YYYY-MM-DD` | KPIs + narrativa Sonnet |
 | `Incidents_YYYY-MM-DD` | Top incidencias abiertas ordenadas por urgencia |
 | `Groups_YYYY-MM-DD` | Health por grupo: volumen, ratio B, sentiment |
 | `Agents_YYYY-MM-DD` | Leaderboard 7d con flag zona roja |
-| `RawSample_YYYY-MM-DD` | 20 mensajes aleatorios clasificados, columna para Santi marcar OK/NOK |
-| `Diffs_YYYY-MM-DD` | Mensajes donde Haiku y Sonnet difieren, para revisión |
+| `RawSample_YYYY-MM-DD` | 20 mensajes aleatorios clasificados por Sonnet, columna para Santi marcar OK/NOK |
 
 ## Slack output
 
-Mensaje resumido con Block Kit: volumen, top 5 grupos en riesgo, top 5 incidencias, agentes en zona roja, consistencia, y link al Sheet.
+Mensaje resumido con Block Kit: volumen, top 5 grupos en riesgo, top 5 incidencias, agentes en zona roja, y link al Sheet.
 
 ## Cron (9pm CDMX)
 

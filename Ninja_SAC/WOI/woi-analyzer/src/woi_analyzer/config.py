@@ -31,7 +31,6 @@ class SupabaseCfg:
 @dataclass(frozen=True)
 class AnthropicCfg:
     api_key: str
-    haiku_model: str
     sonnet_model: str
     max_tokens_classify: int
     max_tokens_summary: int
@@ -40,11 +39,9 @@ class AnthropicCfg:
 @dataclass(frozen=True)
 class AnalyzerCfg:
     batch_size: int
-    ground_truth_daily_sample: int
     context_messages: int
     run_hour_cdmx: int
     feature_incident_reconstruction: bool
-    feature_ground_truth: bool
     slack_webhook_url: str | None
     ttfr_alert_threshold_min: int
 
@@ -65,21 +62,16 @@ def load_config() -> Config:
         ),
         anthropic=AnthropicCfg(
             api_key=_require("ANTHROPIC_API_KEY"),
-            haiku_model=os.environ.get("CLAUDE_HAIKU_MODEL", "claude-haiku-4-5"),  # kept for ground-truth fallback only
             sonnet_model=os.environ.get("CLAUDE_SONNET_MODEL", "claude-sonnet-4-6"),
             max_tokens_classify=int(os.environ.get("CLAUDE_MAX_TOKENS_CLASSIFY", "400")),
             max_tokens_summary=int(os.environ.get("CLAUDE_MAX_TOKENS_SUMMARY", "2000")),
         ),
         analyzer=AnalyzerCfg(
             batch_size=int(os.environ.get("ANALYZER_BATCH_SIZE", "50")),
-            ground_truth_daily_sample=int(os.environ.get("ANALYZER_GROUND_TRUTH_DAILY_SAMPLE", "100")),
             context_messages=int(os.environ.get("ANALYZER_CONTEXT_MESSAGES", "5")),
             run_hour_cdmx=int(os.environ.get("ANALYZER_RUN_HOUR_CDMX", "20")),
             feature_incident_reconstruction=(
                 os.environ.get("FEATURE_INCIDENT_RECONSTRUCTION", "true").lower() == "true"
-            ),
-            feature_ground_truth=(
-                os.environ.get("FEATURE_GROUND_TRUTH_SAMPLING", "true").lower() == "true"
             ),
             slack_webhook_url=os.environ.get("SLACK_WEBHOOK_URL") or None,
             ttfr_alert_threshold_min=int(os.environ.get("TTFR_ALERT_THRESHOLD_MIN", "30")),

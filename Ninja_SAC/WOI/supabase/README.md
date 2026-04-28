@@ -26,7 +26,7 @@ psql "$SUPABASE_DB_URL" -f migrations/002_taxonomy_seed.sql
 | `analysis` | Clasificación Claude por mensaje | Indefinida |
 | `taxonomy` | Catálogo de 21 categorías × 3 buckets | Permanente |
 | `incidents` | Hilos agrupados (open → close) | Indefinida |
-| `ground_truth_samples` | Muestras Sonnet para medir consistencia vs Haiku | Indefinida |
+| `ground_truth_samples` | (Histórica) muestras de la era Haiku↔Sonnet, ya no se escribe — todo el pipeline corre con Sonnet | Indefinida |
 | `classification_feedback` | Loop Santi thumbs up/down | Indefinida |
 | `daily_reports` | Snapshot histórico del reporte | Indefinida |
 

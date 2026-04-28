@@ -21,7 +21,7 @@
 ### 2. Goals (Measurable) — V1
 
 1. Capturar 100% de mensajes de los grupos del piloto con latencia <60s desde envío a ingesta en DB.
-2. Clasificar mensajes en 21 categorías (3 buckets: positivos, incidencias, conversacional) con **consistencia Haiku↔Sonnet ≥80%** a 30 días de calibración.
+2. Clasificar mensajes en 21 categorías (3 buckets: positivos, incidencias, conversacional) con Sonnet, validando **accuracy ≥85% vs spot-check humano** sobre el tab `RawSample_*` a 30 días de calibración.
 3. Ratio Bucket B (incidencias) / total como métrica header diaria de health por grupo.
 4. Medir TTFR (Time To First Response) por agente con granularidad de minuto, respetando timezone de cada grupo.
 5. Reporte ejecutivo diario (9pm CDMX) entregado a Santi como **Google Sheet auto-actualizado + link en Slack** desde semana 3.
@@ -63,12 +63,10 @@
 **FR-3 — Análisis (Batch):**
 - FR-3.1. Job diario **8pm CDMX** que procesa todos los mensajes de las últimas 24h no analizados.
 - FR-3.2. Por cada mensaje, el sistema clasifica: **1 categoría de 21** (ver Appendix B), sentiment (-1 a +1), urgencia (baja/media/alta), e indicadores booleanos `is_incident_open` / `is_incident_close`.
-- FR-3.3. **Modelo de producción:** Claude Haiku 4.5 para clasificación masiva. Claude Sonnet (modelo más reciente disponible en API, configurable vía env `CLAUDE_SONNET_MODEL`) para:
-  - (a) Resumen ejecutivo diario con narrative.
-  - (b) Ground-truth labeler: clasifica una muestra aleatoria de 100 mensajes/día con prompt extendido y reasoning, para medir consistencia vs Haiku.
+- FR-3.3. **Modelo de producción:** Claude Sonnet (modelo más reciente disponible en API, configurable vía env `CLAUDE_SONNET_MODEL`) para todo el pipeline: clasificación masiva, análisis horario por grupo, reconstrucción/resúmenes de incidentes, morning briefing y narrativa diaria. No se usa Haiku — la duplicidad Haiku+Sonnet del piloto inicial fue reemplazada porque Sonnet a costo actual ofrece mejor accuracy operacional con sólo un modelo que mantener.
 - FR-3.4. Prompt caching agresivo: system prompt estable (cached 5min+), few-shot examples en segundo bloque (no cached, rotables semanalmente sin invalidar cache).
 - FR-3.5. Reconstrucción de `incidents`: agrupar mensajes en hilos lógicos (apertura → resolución) con timestamps de first_response, resolution, y agente responsable. **Spike técnico obligatorio semanas 1-2** sobre 500 mensajes reales antes de comprometer design final.
-- FR-3.6. Spot-check manual de Santi: 50 mensajes aleatorios en semana 4-5, validados contra Sonnet ground-truth, para detectar sesgos sistemáticos de Sonnet.
+- FR-3.6. Spot-check manual de Santi: 50 mensajes aleatorios/semana sobre el tab `RawSample_*` para detectar sesgos sistemáticos del clasificador.
 
 **FR-4 — Reporte ejecutivo diario:**
 - FR-4.1. Trigger: **9pm CDMX**, después de que termine el job de análisis (8pm).
@@ -125,13 +123,13 @@
 
 ### 7. Technical Considerations
 
-- **Stack:** Node.js 20+ (Baileys), Python 3.12 (análisis + reporter), Supabase (Postgres + Storage), Anthropic API (Haiku + Sonnet), Google Sheets API, Slack webhook.
+- **Stack:** Node.js 20+ (Baileys), Python 3.12 (análisis + reporter), Supabase (Postgres + Storage), Anthropic API (Sonnet, modelo único), Google Sheets API, Slack webhook.
 - **Host:** Mac Mini M4 (16GB). PM2 para Baileys, launchd para cron jobs Python.
 - **Fallback:** segundo SIM standby desde semana 1. Si Mac Mini se satura → plan B Hetzner CX22 (~$8/mes) documentado pero no ejecutado en V1.
 - **Secrets:** `.env` local + 1Password para backup. No se commitean.
 - **Observabilidad:** logs rotados diarios, healthcheck cada 5min, ping a Slack si Baileys cae >2min o si job de análisis no produjo output a las 8:30pm.
 - **Backup auth_state:** Baileys `auth_state` sincronizado a Supabase Storage cada 1h. Recovery procedure documentado en runbook.
-- **Costo target V1:** <$80 USD/mes (Supabase Pro $25 + Claude ~$40 + SIM $10 + misc).
+- **Costo target V1:** <$200 USD/mes (Supabase Pro $25 + Claude Sonnet ~$160 + SIM $10 + misc). Sonnet-only sube el costo respecto al approach Haiku+Sonnet del PRD original, pero simplifica el pipeline y mejora accuracy operacional.
 - **Legal V1:** piloto solo en grupos 99-internos + cuentas con founder amigo/conocido con consent verbal informal de Santi. NO se abre a clientes externos sin Legal formal en V1.5.
 - **Riesgo Baileys:** reconocido. Mitigación = staggered onboarding (máx 1 grupo nuevo cada 2-3 días), SIM standby, no bulk-add. Si ban a los 30 días, se acepta como aprendizaje y se migra a WABA oficial para V1.5+.
 
@@ -140,11 +138,11 @@
 | Métrica | Target semana 4 | Target semana 8 |
 |---|---|---|
 | Uptime listener | ≥90% | ≥95% |
-| Consistencia Haiku↔Sonnet | ≥70% | ≥80% |
+| Accuracy Sonnet vs spot-check Santi | ≥80% (50 msgs/sem) | ≥90% (50 msgs/sem) |
 | Mensajes procesados <24h | ≥90% | ≥99% |
 | Santi abre el Sheet diario | ≥4/7 días | ≥6/7 días |
 | Ratio B (incidencias) como señal útil | N/A | Santi confirma que correlaciona con su percepción cualitativa |
-| Costo real vs target | ≤$100 | ≤$80 |
+| Costo real vs target | ≤$220 | ≤$200 |
 | Incidentes de ban | 0 | 0 |
 
 ### 9. Open Questions — Resueltas en v1.1
@@ -159,7 +157,7 @@
 | 6 | Canal + hora del reporte | Google Sheet auto + link Slack, 9pm CDMX diario |
 | 7 | Retención raw | Indefinida en V1 (piloto interno). Política formal en V1.5 |
 | 8 | Zonas horarias | Campo `timezone` en tabla `groups`, set manual en onboarding |
-| 9 | Modelos Claude | Haiku 4.5 para masivo + Sonnet más reciente (env var) para resumen y ground-truth |
+| 9 | Modelos Claude | Sonnet (último slug disponible vía env var) para todo el pipeline; sin Haiku |
 | 10 | Taxonomía categorías | 21 categorías en 3 buckets (A: 7 positivos, B: 9 incidencias, C: 5 conversacional) |
 | 11 | Edits/deletes | Ignorar en V1 |
 | 12 | Scope V1 | Ver tabla sección "V1 Plan" |
@@ -189,7 +187,7 @@
 | T0 — Spike técnico | Prototipo de incident reconstruction sobre 500 mensajes reales, semanas 1-2 |
 | T1 — Infra base | Supabase Pro + schema 6 tablas + backup config |
 | T2 — Listener Baileys | Node.js + PM2 + auth_state backup + healthcheck |
-| T3 — Análisis batch | Python + Haiku + Sonnet + prompt caching + reconstrucción incidents |
+| T3 — Análisis batch | Python + Sonnet + prompt caching + reconstrucción incidents |
 | T4 — Reporte diario | Google Sheet auto + Slack link, 9pm CDMX |
 | T6 — Calibración | Sonnet-as-ground-truth + spot-check manual + feedback loop simplificado vía Sheet |
 | T9 — Onboarding UI | Mini-app Streamlit o Next.js para Santi |
@@ -211,7 +209,7 @@
 ```
 Semana 1: T1 (infra) + T0.1 (spike inicio) + T2.1 (SIM adquisición)
 Semana 2: T2 (listener) + T0.2 (spike cierre con conclusión) + primer grupo interno conectado
-Semana 3: T3 (análisis batch Haiku) + T9 (onboarding UI v1) + 3-5 grupos internos activos
+Semana 3: T3 (análisis batch Sonnet) + T9 (onboarding UI v1) + 3-5 grupos internos activos
 Semana 4: T4 (reporte Google Sheet) + T3 (Sonnet resumen) + primer reporte diario entregado
 Semana 5: T6 (calibración inicia) + spot-check manual Santi (50 msgs)
 Semana 6: Onboarding de cuentas con founder amigo (staggered, 1 cada 2-3 días)
@@ -229,19 +227,19 @@ Semana 8: Hardening, bugfixes, runbook, retrospectiva, plan V1.5 firmado.
 ### Go/No-Go para V1.5
 
 - V1 corriendo 14 días consecutivos con uptime ≥90%.
-- Consistencia Haiku↔Sonnet ≥75% validada sobre muestra.
+- Accuracy Sonnet ≥85% sobre 50 msgs/sem de spot-check humano (`RawSample_*`).
 - Santi abre el Sheet ≥4/7 días en las últimas 2 semanas.
 - 0 incidentes de ban del listener.
-- Costo real ≤$100/mes confirmado.
+- Costo real ≤$220/mes confirmado.
 - Santi aprueba subjetivamente que el ratio B/total correlaciona con su percepción del health de los grupos.
 
 ### Quick wins por semana
 
 - **Sem 1:** Supabase levantado, schema aplicado, spike arranca.
 - **Sem 2:** Listener estable, auth_state backup funcionando, 500+ mensajes ingestados de grupo de prueba.
-- **Sem 3:** Primer mensaje clasificado por Haiku en DB. Onboarding UI deployed localmente.
+- **Sem 3:** Primer mensaje clasificado por Sonnet en DB. Onboarding UI deployed localmente.
 - **Sem 4:** Primer Google Sheet auto-generado con data real, Slack link recibido por Santi.
-- **Sem 5:** Métricas de consistencia calculadas, primer spot-check documentado.
+- **Sem 5:** Primera tanda de spot-check (50 msgs) documentada vs Sonnet.
 - **Sem 6:** 5-7 grupos activos incluyendo 2-3 con founder amigo.
 - **Sem 7:** Feedback loop ingiriendo marcas de Santi, few-shot actualizado.
 - **Sem 8:** Runbook publicado, retrospectiva, decisión Go/No-Go V1.5.
@@ -305,7 +303,7 @@ CREATE TABLE analysis (
   is_incident_open BOOLEAN DEFAULT FALSE,
   is_incident_close BOOLEAN DEFAULT FALSE,
   incident_id BIGINT,
-  claude_model TEXT NOT NULL,  -- v1.1: para poder filtrar Haiku vs Sonnet
+  claude_model TEXT NOT NULL,  -- slug del modelo Sonnet usado (queda registrado por auditabilidad)
   claude_raw JSONB,
   reasoning TEXT,  -- v1.1: explicit para auditabilidad
   analyzed_at TIMESTAMPTZ DEFAULT NOW()
@@ -313,17 +311,20 @@ CREATE TABLE analysis (
 CREATE INDEX idx_analysis_bucket ON analysis(bucket);
 CREATE INDEX idx_analysis_incident ON analysis(incident_id) WHERE incident_id IS NOT NULL;
 
--- ground_truth_samples: subset de mensajes clasificados por Sonnet para medir consistencia
-CREATE TABLE ground_truth_samples (  -- v1.1 new table
+-- ground_truth_samples: tabla histórica de la era Haiku↔Sonnet (V1 piloto inicial).
+-- Se mantiene en el schema para preservar data ya recolectada, pero el pipeline
+-- ya NO escribe filas nuevas — todo el batch corre con Sonnet, sin segundo modelo
+-- contra el cual comparar. Las columnas haiku_* quedan deprecadas. Ver migration 015.
+CREATE TABLE ground_truth_samples (  -- DEPRECATED como destino de escritura (V1.1 → Sonnet-only)
   id BIGSERIAL PRIMARY KEY,
   message_id BIGINT REFERENCES messages(id) ON DELETE CASCADE,
   sonnet_category TEXT NOT NULL,
   sonnet_sentiment NUMERIC(3,2),
   sonnet_urgency TEXT,
   sonnet_reasoning TEXT,
-  haiku_category TEXT,
-  haiku_sentiment NUMERIC(3,2),
-  match_category BOOLEAN,
+  haiku_category TEXT,                                                            -- DEPRECATED
+  haiku_sentiment NUMERIC(3,2),                                                   -- DEPRECATED
+  match_category BOOLEAN,                                                          -- DEPRECATED
   santi_review TEXT CHECK (santi_review IN ('agree_sonnet', 'agree_haiku', 'disagree_both', 'unreviewed')) DEFAULT 'unreviewed',
   santi_note TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
@@ -470,15 +471,14 @@ Message to classify:
 | Item | Costo mensual USD | Notas |
 |---|---|---|
 | Supabase Pro | $25 | Plan base |
-| Claude Haiku 4.5 | $15-25 | 30K msg × ~1.5K tokens input cached 80% |
-| Claude Sonnet (ground-truth + resumen) | $10-15 | 3K msg/mes ground-truth + 30 resúmenes diarios |
+| Claude Sonnet (clasificación + análisis + resúmenes) | $140-180 | 30K msg × ~1.5K tokens input cached 80%; reemplaza el approach Haiku+Sonnet original. |
 | SIM prepago MX | $10 | Recarga mensual |
 | SIM standby | $5 | Recarga mínima para mantener activo |
 | Mac Mini compute | $0 | Existente |
 | Google Sheets / Slack | $0 | Workspace existente |
-| **Total V1** | **$65-80** | Bajo el target de $80 |
+| **Total V1** | **$180-220** | Sonnet-only sube el costo respecto al PRD original ($65-80) pero simplifica el pipeline a un solo modelo y mejora accuracy operacional. |
 
-A escala de 50 grupos (V2), extrapolación: $150-220/mes. Target $120 del PRD original se revisa en V2.
+A escala de 50 grupos (V2), extrapolación: $400-650/mes. Se revisa el target en V2 — opciones: prompt caching más agresivo, batch API, o reintroducir Haiku como pre-filtro si el delta de accuracy lo justifica.
 
 ---
 
@@ -488,13 +488,13 @@ A escala de 50 grupos (V2), extrapolación: $150-220/mes. Target $120 del PRD or
 |---|---|---|---|
 | Ban del número Baileys | Media-Alta | Alto | SIM standby + staggered onboarding + no bulk-add; aceptado explícitamente |
 | Spike revela incident reconstruction inviable con batch | Media | Alto | Fallback: reportar por mensaje/día sin agrupar en incidentes en V1 |
-| Sonnet ground-truth sesgado | Media | Medio | Spot-check manual Santi semana 4-5, 50 msgs |
-| Consistencia Haiku↔Sonnet <70% a 30d | Media | Medio | Extender piloto 2 semanas, refinar few-shot |
+| Sonnet sesgado por categoría | Media | Medio | Spot-check manual Santi semanal sobre `RawSample_*` (50 msgs) + ajustar few-shot examples |
+| Accuracy Sonnet vs spot-check humano <85% a 30d | Media | Medio | Extender piloto 2 semanas, refinar few-shot, evaluar prompt caching más agresivo |
 | Mac Mini se satura | Baja | Medio | Plan B Hetzner documentado en runbook, no ejecutado V1 |
 | Baileys breaking change | Media | Medio | Versionar dependencia, subscribe a releases Github |
 | Agente 99 con número personal contamina data | Alta | Medio | Auditoría semanal vía UI de onboarding, flag manual |
 | Google Sheets API rate limit | Baja | Bajo | Una escritura batch por día, muy por debajo del límite |
-| Costo excede $80/mes | Baja | Bajo | Cap en Anthropic Console |
+| Costo excede $220/mes | Media | Bajo | Cap en Anthropic Console + monitor semanal; considerar batch API o cache TTL extendido |
 
 ---
 
@@ -506,7 +506,7 @@ A escala de 50 grupos (V2), extrapolación: $150-220/mes. Target $120 del PRD or
 - **Sentiment score del grupo:** promedio ponderado por recencia de sentiments de mensajes `cliente` en últimos 30 días.
 - **Ratio B:** count(bucket='B') / count(bucket IN ('A','B','C')) en ventana definida.
 - **Zona roja TTFR (V1):** TTFR promedio semanal del agente >30 min dentro de business hours (9am-8pm en TZ del grupo).
-- **Consistencia Haiku↔Sonnet:** % de mensajes en `ground_truth_samples` donde `haiku_category = sonnet_category`.
+- **Accuracy Sonnet:** % de mensajes del `RawSample_*` semanal donde el spot-check humano (Santi) marca la categoría como correcta.
 
 ---
 
@@ -517,14 +517,14 @@ A escala de 50 grupos (V2), extrapolación: $150-220/mes. Target $120 del PRD or
 | 1 | Transport | Baileys | Baileys (confirmado, riesgo aceptado) | — |
 | 2 | Legal | T7.1 sem 5 | V1 solo interno, Legal en V1.5 | -3 semanas riesgo |
 | 3 | Rollout | 20 grupos externos | 5-10 grupos internos + founder-friends | -50% riesgo legal, -75% riesgo ban |
-| 4 | Accuracy | 85% vs validación humana | Consistencia Haiku↔Sonnet 80% | Medible sin labeler humano |
+| 4 | Accuracy | 85% vs validación humana | Sonnet-only + spot-check semanal Santi sobre `RawSample_*` (50 msgs) | Validación humana directa, sin segundo modelo de comparación |
 | 5 | Reporte | Email HTML 6:30am + Slack | Google Sheet 9pm + Slack link | -60% esfuerzo T4 |
 | 6 | Dashboard | Looker Studio V1 | OUT V1, eval V1.5 | -1 semana T5 |
 | 7 | HubSpot sync | V2 | V2 confirmado | — |
 | 8 | Alertas RT | V2 | V2 confirmado | — |
 | 9 | Retención | 90d / indefinida | Indefinida V1 (interno) | Sin bloqueador legal |
 | 10 | Timezones | No definido | Campo TZ por grupo | +1 columna schema |
-| 11 | Modelos | Haiku 4.5 + Sonnet 4.6 | Haiku 4.5 + Sonnet latest (env var) | Forward-compat |
+| 11 | Modelos | Haiku 4.5 + Sonnet 4.6 | Sonnet único (slug último vía env var); Haiku descontinuado del pipeline | Simplifica ops, sube costo, mejora accuracy operacional |
 | 12 | Categorías | 7 genéricas | 21 en 3 buckets (ops-específicas) | Taxonomía alineada a operación real |
 | 13 | Edits/deletes | No mencionado | Ignorados V1 | Schema simplificado |
 | 14 | Incident reconstruction | T3.5 viñeta | T0 spike obligatorio semanas 1-2 | -riesgo de sorpresa semana 6 |

@@ -1,7 +1,7 @@
 # WOI — WhatsApp Ops Intelligence
 
 Sistema automatizado de análisis de grupos de WhatsApp operativos de 99minutos.
-Ingesta mensajes vía Baileys, clasifica con Claude Haiku 4.5, y entrega reporte diario en Google Sheet.
+Ingesta mensajes vía Baileys, los clasifica y resume con Claude Sonnet, y entrega reporte diario en Google Sheet.
 
 **Estado:** V1 piloto interno (5-10 grupos). Ver [PRD-v1.1.md](./PRD-v1.1.md).
 **Owner:** Santiago (CGO).
@@ -32,7 +32,7 @@ Ingesta mensajes vía Baileys, clasifica con Claude Haiku 4.5, y entrega reporte
 
 - **Baileys** (Node 20+) — captura WhatsApp multi-grupo
 - **Supabase** (Postgres + Storage) — persistencia + backup de auth state
-- **Anthropic Claude** — Haiku 4.5 clasificación masiva, Sonnet latest ground-truth + resumen
+- **Anthropic Claude** — Sonnet (modelo único) para clasificación, análisis de grupos y resúmenes
 - **Google Sheets API** — delivery del reporte
 - **Slack Webhook** — notificación con link
 - **Streamlit** — UI de onboarding manual (Santi)
@@ -80,10 +80,10 @@ Ver `PRD-v1.1.md` sección "V1 Plan".
 ## Go/No-Go para V1.5
 
 - 14 días consecutivos uptime ≥90%
-- Consistencia Haiku↔Sonnet ≥75%
+- Accuracy Sonnet ≥85% vs spot-check humano sobre `RawSample_*`
 - Santi abre el Sheet ≥4/7 días 2 semanas seguidas
 - 0 bans del listener
-- Costo real ≤$100/mes
+- Costo real ≤$200/mes
 
 ## Licencia
 

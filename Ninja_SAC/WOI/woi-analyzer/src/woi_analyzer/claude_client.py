@@ -177,11 +177,11 @@ def classify_message(
     context_messages: list[dict[str, Any]],
     message_content: str,
     model: str | None = None,
-    use_sonnet: bool = False,
 ) -> tuple[ClassificationResult, dict[str, Any], dict[str, Any]]:
     """
-    Clasifica un mensaje. Devuelve (result, claude_raw_dict, usage_dict).
-    - use_sonnet=True activa ground-truth con Sonnet (no cache para avoid stampede).
+    Clasifica un mensaje con Sonnet. Devuelve (result, claude_raw_dict, usage_dict).
+    `model` permite forzar un slug específico (por ejemplo para A/B testing); por
+    defecto se usa CONFIG.anthropic.sonnet_model.
     """
     system_prompt = _read_prompt("classification_system.md")
     few_shot = _read_prompt("few_shot_examples.md")
@@ -198,9 +198,7 @@ def classify_message(
         message_content=message_content,
     )
 
-    chosen_model = model or (
-        CONFIG.anthropic.sonnet_model if use_sonnet else CONFIG.anthropic.haiku_model
-    )
+    chosen_model = model or CONFIG.anthropic.sonnet_model
 
     system_block = [
         {

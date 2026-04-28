@@ -9,7 +9,7 @@ import click
 
 from woi_analyzer.classifier import run_classification_batch
 from woi_analyzer.daily_batch import run_daily_batch
-from woi_analyzer.db import compute_haiku_consistency, fetch_taxonomy, reset_analyzed_flag
+from woi_analyzer.db import fetch_taxonomy, reset_analyzed_flag
 from woi_analyzer.group_analyst import run_group_analysis_batch
 from woi_analyzer.incident_reconstructor import reconstruct_recent_incidents
 from woi_analyzer.kpi_snapshotter import backfill_kpi_snapshots, run_kpi_snapshot
@@ -42,20 +42,9 @@ def reconstruct(lookback_hours: int, all_history: bool) -> None:
 
 @main.command()
 def daily() -> None:
-    """Run the full daily batch: classify + reconstruct + consistency."""
+    """Run the full daily batch: classify + reconstruct + report."""
     result = run_daily_batch()
     click.echo(json.dumps(result, indent=2, default=str))
-
-
-@main.command()
-@click.option("--days", type=int, default=7)
-def consistency(days: int) -> None:
-    """Print Haiku↔Sonnet consistency % for last N days."""
-    pct = compute_haiku_consistency(days=days)
-    if pct is None:
-        click.echo("No ground_truth_samples available")
-        sys.exit(2)
-    click.echo(f"Haiku↔Sonnet consistency (last {days}d): {pct:.2f}%")
 
 
 @main.command()

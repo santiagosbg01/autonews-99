@@ -1,7 +1,7 @@
 [project]
 name = "woi-analyzer"
 version = "1.0.0"
-description = "WOI — pipeline de análisis Claude (Haiku clasificación + Sonnet ground-truth y resumen)"
+description = "WOI — pipeline de análisis Claude Sonnet (clasificación, análisis de grupos, reconstrucción de incidentes y narrativa diaria)"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

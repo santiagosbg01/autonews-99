@@ -2,7 +2,7 @@
 Scheduler de producción para Railway.
 
 - Cada hora (24/7, escaneando todos los timezones de los grupos):
-    1. run_classification_batch()       — clasifica mensajes nuevos con Haiku
+    1. run_classification_batch()       — clasifica mensajes nuevos con Sonnet
     2. reconstruct_recent_incidents()   — actualiza incidentes
     3. run_group_analysis_batch()       — análisis Sonnet de cada grupo
     4. run_due_briefings()              — genera briefing por grupo cuando

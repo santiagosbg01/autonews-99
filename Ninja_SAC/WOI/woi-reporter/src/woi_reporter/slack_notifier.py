@@ -17,7 +17,6 @@ def build_message(
     groups_at_risk: list[dict],
     top_incidents: list[dict],
     agents_red: list[dict],
-    consistency: dict,
 ) -> dict[str, Any]:
     """Construye bloques de Slack (Block Kit)."""
     total = overview.get("total", 0)
@@ -91,22 +90,6 @@ def build_message(
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "*Agentes en zona roja:* ninguno."},
-            }
-        )
-
-    # Consistencia
-    pct = consistency.get("consistency_pct")
-    n = consistency.get("sample_size", 0)
-    if pct is not None:
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"Consistencia Haiku↔Sonnet hoy: *{pct}%* (N={n})",
-                    }
-                ],
             }
         )
 

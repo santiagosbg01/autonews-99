@@ -31,7 +31,7 @@ cp .env.example .env
 
 Llenar `.env` con:
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_URL`, `SUPABASE_STORAGE_BUCKET`
-- `ANTHROPIC_API_KEY`, `CLAUDE_HAIKU_MODEL`, `CLAUDE_SONNET_MODEL`
+- `ANTHROPIC_API_KEY`, `CLAUDE_SONNET_MODEL`
 - `SLACK_WEBHOOK_URL`, `SLACK_HEALTHCHECK_WEBHOOK`
 - `GOOGLE_SHEETS_CREDENTIALS_PATH`, `GOOGLE_SHEETS_REPORT_ID`
 - `STREAMLIT_PASSWORD`
@@ -127,7 +127,6 @@ Agregar el listener a 1-2 grupos internos de prueba. Esperar 5-10 min. Volver a 
 2. Tab `Overview_YYYY-MM-DD`: leer ratio B y narrativa.
 3. Tab `Incidents_YYYY-MM-DD`: revisar top 3-5 incidencias abiertas.
 4. Tab `RawSample_YYYY-MM-DD`: marcar 3-5 mensajes con OK/NOK/recategorizar (columna L). Esto alimenta el feedback loop semanal.
-5. Tab `Diffs_YYYY-MM-DD`: revisar 2-3 disagreements Haiku↔Sonnet para intuir patrones.
 
 ---
 
@@ -217,9 +216,10 @@ cd ../woi-reporter
 ```bash
 # Verificar gastos en Anthropic Console
 # Si Claude se disparó:
-#   - Bajar ANALYZER_GROUND_TRUTH_DAILY_SAMPLE a 50
-#   - Cambiar CLAUDE_SONNET_MODEL a modelo más barato
 #   - Reducir contexto con ANALYZER_CONTEXT_MESSAGES=2
+#   - Bajar ANALYZER_BATCH_SIZE para fragmentar runs
+#   - Cambiar CLAUDE_SONNET_MODEL a un slug más barato si Anthropic publica uno
+#   - Considerar batch API o cache TTL extendido si el spike es estructural
 ```
 
 ---
@@ -239,10 +239,10 @@ Resumen:
 
 ## Checklist semanal (viernes 5pm)
 
-- [ ] Revisar accuracy Haiku↔Sonnet en `daily_reports` últimos 7d
+- [ ] Revisar accuracy de Sonnet sobre los `RawSample_*` últimos 7d (spot-check Santi)
 - [ ] Procesar thumbs up/down de `Raw_Sample` de la semana
 - [ ] Actualizar few-shot examples en `woi-analyzer/src/woi_analyzer/prompts/few_shot_examples.md`
-- [ ] Verificar costos Anthropic vs budget $80
+- [ ] Verificar costos Anthropic vs budget $200
 - [ ] Revisar logs de healthcheck: cuántos failures hubo?
 - [ ] Revisar Storage de `woi-auth-backup`: rotación correcta?
 - [ ] Revisar grupos con `ratio_b_pct > 40%` por 3+ días seguidos (posible churn risk)
@@ -255,7 +255,7 @@ Resumen:
 |---|---|---|
 | "Missing required env var" al arrancar | `.env` no está o falta una var | Copiar `.env.example` → `.env` |
 | Listener arranca pero no ingesta | QR no escaneado, auth_state vacío | `npm run qr` |
-| Clasificación devuelve `otro` siempre | Prompt caching inválido o modelo incorrecto | Revisar `CLAUDE_HAIKU_MODEL`, probar con Sonnet temporalmente |
+| Clasificación devuelve `otro` siempre | Prompt caching inválido o modelo incorrecto | Revisar `CLAUDE_SONNET_MODEL`, comparar slug contra el listado de Anthropic |
 | TTFR sale siempre NULL | No hay participantes con role='agente_99' | Confirmar participantes en Onboarding UI |
 | Ratio B siempre 0% | Participantes todos como 'otro' (ninguno cliente) | Confirmar clientes en Onboarding UI |
 | Sheet vacío | Service account no tiene permisos | Compartir Sheet con email del SA |
