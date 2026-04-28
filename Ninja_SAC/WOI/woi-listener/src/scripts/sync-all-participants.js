@@ -117,11 +117,16 @@ async function fetchSnapshotOnce() {
       try {
         log.info('Connection open — fetching snapshot of all participating groups');
         const snapshot = await sock.groupFetchAllParticipating();
+        // El JID del propio bot listener — lo excluimos del roster (no es un
+        // humano participante, es el monitor). Sin esto cuenta como miembro de
+        // los 60 grupos e infla el conteo.
+        const ownJid = sock.user?.id ?? null;
+        const ownPhone = jidToPhone(ownJid);
         settled = true;
         clearTimeout(timeout);
-        log.info({ groupCount: Object.keys(snapshot).length }, 'Snapshot fetched, closing socket');
+        log.info({ groupCount: Object.keys(snapshot).length, ownPhone }, 'Snapshot fetched, closing socket');
         try { await sock.end(); } catch { /* ignore */ }
-        resolve(snapshot);
+        resolve({ snapshot, ownPhone });
       } catch (err) {
         if (settled) return;
         settled = true;
@@ -159,8 +164,9 @@ async function fetchSnapshot() {
 
 async function main() {
   log.info('Starting participant sync — opening Baileys socket');
-  const snapshot = await fetchSnapshot();
+  const { snapshot, ownPhone } = await fetchSnapshot();
   const groups = Object.values(snapshot);
+  log.info({ ownPhone }, 'Excluding own listener bot phone from rosters');
 
   const stats = {
     groupsTotal: groups.length,
@@ -203,6 +209,10 @@ async function main() {
             { group: g.subject, memberId: member.id, lid: member.lid, jid: member.jid },
             'Skipping member without resolvable phone'
           );
+          continue;
+        }
+        // Excluir al propio bot listener (no es un humano participante).
+        if (ownPhone && phone === ownPhone) {
           continue;
         }
         try {
