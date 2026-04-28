@@ -168,6 +168,7 @@ export type GroupDetail = {
   business_hour_start: number
   business_hour_end: number
   business_days: string[]
+  operational_context: string | null
 }
 
 export type MessageRow = {
@@ -497,11 +498,29 @@ export async function getGroupHealth(groupId: number): Promise<HealthScore> {
 export async function getGroupDetail(id: number): Promise<GroupDetail | null> {
   const { data, error } = await supabaseAdmin
     .from('groups')
-    .select('id, name, whatsapp_id, pilot_cohort, timezone, notes, joined_at, business_hour_start, business_hour_end, business_days')
+    .select('id, name, whatsapp_id, pilot_cohort, timezone, notes, joined_at, business_hour_start, business_hour_end, business_days, operational_context')
     .eq('id', id)
     .single()
   if (error) return null
   return data
+}
+
+export async function updateGroupOperationalContext(
+  groupId: number,
+  context: string,
+): Promise<{ ok: boolean; error?: string }> {
+  // Cap defensivo: el backend trunca a 4000 chars, frenamos antes para
+  // dar mejor feedback al usuario.
+  if (context.length > 4000) {
+    return { ok: false, error: `Texto demasiado largo (${context.length} > 4000 chars). Acórtalo o usa secciones más concisas.` }
+  }
+  const value = context.trim() || null
+  const { error } = await supabaseAdmin
+    .from('groups')
+    .update({ operational_context: value })
+    .eq('id', groupId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
 }
 
 export const VALID_BUSINESS_DAYS = ['mon','tue','wed','thu','fri','sat','sun'] as const

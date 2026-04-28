@@ -43,6 +43,7 @@ def _analyze_one(g: dict, window_start: datetime, now: datetime, window_hours: i
         timezone=g.get("timezone") or "America/Mexico_City",
         messages=messages,
         window_hours=window_hours,
+        operational_context=g.get("operational_context"),
     )
 
     category_counts = result.pop("_category_counts", {})

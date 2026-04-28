@@ -100,6 +100,9 @@ class IncidentCandidate:
     business_hour_start: int | None = None
     business_hour_end: int | None = None
     business_days: list[str] | None = None
+    # Texto libre operacional del grupo (groups.operational_context). Se inyecta
+    # en prompts Sonnet del incident summary y resolution check.
+    operational_context: str | None = None
     # Why/how this incident was closed (used only when closed_at is set).
     # 'agent_signal' = strong/weak close from agente_99, 'customer_signal' = strong
     # close from a non-agent (cliente confirmed delivery, etc.). None when still open.
@@ -121,7 +124,8 @@ def _fetch_group_messages_for_reconstruction(group_id: int, since: datetime) -> 
             g.timezone            AS group_tz,
             g.business_hour_start AS bh_start,
             g.business_hour_end   AS bh_end,
-            g.business_days       AS bh_days
+            g.business_days       AS bh_days,
+            g.operational_context AS op_ctx
         FROM messages m
         JOIN analysis a ON a.message_id = m.id
         JOIN groups g   ON g.id = m.group_id
@@ -179,6 +183,7 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
                 business_hour_start=m.get("bh_start"),
                 business_hour_end=m.get("bh_end"),
                 business_days=m.get("bh_days"),
+                operational_context=m.get("op_ctx"),
             )
             continue
 
@@ -415,6 +420,7 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
                         ttfr_seconds=ttfr_sec,
                         ttr_seconds=ttr_sec,
                         is_closed=c.closed_at is not None,
+                        operational_context=c.operational_context,
                     )
                     update_incident_summary(incident_id, summary)
                     log.info("incident_summary_generated", incident_id=incident_id)
@@ -567,7 +573,8 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
             SELECT i.id, i.opened_at, i.category, i.urgency, i.status, i.timezone,
                    g.business_hour_start AS bh_start,
                    g.business_hour_end   AS bh_end,
-                   g.business_days       AS bh_days
+                   g.business_days       AS bh_days,
+                   g.operational_context AS op_ctx
             FROM incidents i
             JOIN groups g ON g.id = i.group_id
             WHERE i.status NOT IN ('resuelto', 'escalado', 'no_resuelto_eod')
@@ -602,7 +609,10 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
             if not msgs:
                 continue
 
-            verdict = ask_is_resolved(msgs, ticket["category"])
+            verdict = ask_is_resolved(
+                msgs, ticket["category"],
+                operational_context=ticket.get("op_ctx"),
+            )
 
             with connect() as conn3, conn3.cursor() as cur3:
                 cur3.execute(

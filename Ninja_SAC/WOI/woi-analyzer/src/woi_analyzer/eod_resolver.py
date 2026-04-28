@@ -69,7 +69,8 @@ def _fetch_open_tickets_for_group(group_id: int) -> list[dict[str, Any]]:
                    i.first_response_at, i.timezone,
                    g.business_hour_start AS bh_start,
                    g.business_hour_end   AS bh_end,
-                   g.business_days       AS bh_days
+                   g.business_days       AS bh_days,
+                   g.operational_context AS op_ctx
             FROM incidents i
             JOIN groups g ON g.id = i.group_id
             WHERE i.group_id = %s
@@ -220,7 +221,10 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
                 unresolved += 1
                 continue
 
-            verdict = ask_is_resolved(msgs, t.get("category"), eod_mode=True)
+            verdict = ask_is_resolved(
+                msgs, t.get("category"), eod_mode=True,
+                operational_context=t.get("op_ctx"),
+            )
             with connect() as conn, conn.cursor() as cur:
                 if verdict["resolved"]:
                     _close_resolved(

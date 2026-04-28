@@ -39,6 +39,9 @@ class MessageRow:
     content: str | None
     media_type: str | None
     reply_to_msg_id: str | None
+    # Texto libre de contexto operacional del grupo (groups.operational_context).
+    # Se inyecta al system prompt de Sonnet para mejor clasificación. None = sin contexto.
+    group_operational_context: str | None = None
 
 
 def fetch_unanalyzed_messages(
@@ -55,11 +58,12 @@ def fetch_unanalyzed_messages(
     query = """
         SELECT
             m.id, m.whatsapp_msg_id, m.group_id,
-            g.name     AS group_name,
-            g.timezone AS group_timezone,
-            g.country  AS group_country,
+            g.name                AS group_name,
+            g.timezone            AS group_timezone,
+            g.country             AS group_country,
             m.sender_phone, m.sender_role, m.sender_display_name,
-            m.timestamp, m.content, m.media_type, m.reply_to_msg_id
+            m.timestamp, m.content, m.media_type, m.reply_to_msg_id,
+            g.operational_context AS group_operational_context
         FROM messages m
         JOIN groups g ON g.id = m.group_id
         WHERE m.analyzed = FALSE
@@ -540,9 +544,28 @@ def fetch_group_kpi_history(group_id: int, days: int = 30) -> list[dict[str, Any
 def fetch_active_groups() -> list[dict[str, Any]]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, name, timezone, country, vertical FROM groups WHERE is_active = TRUE ORDER BY name"
+            """
+            SELECT id, name, timezone, country, vertical, operational_context
+            FROM groups WHERE is_active = TRUE ORDER BY name
+            """
         )
         return cur.fetchall()
+
+
+def fetch_group_operational_context(group_id: int) -> str | None:
+    """Devuelve groups.operational_context para un grupo, o None si vacío/no existe."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT operational_context FROM groups WHERE id = %s",
+            (group_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    val = row.get("operational_context") if isinstance(row, dict) else row[0]
+    if isinstance(val, str) and val.strip():
+        return val
+    return None
 
 
 def fetch_messages_for_group_analysis(

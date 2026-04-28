@@ -10,6 +10,7 @@ import ChurnAlertBanner from '@/app/components/ChurnAlertBanner'
 import NoiseBar from '@/app/components/NoiseBar'
 import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
 import BusinessHoursCard from '@/app/components/BusinessHoursCard'
+import OperationalContextCard from '@/app/components/OperationalContextCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -260,6 +261,13 @@ export default async function GroupPage({ params, searchParams }: {
             initialEnd={group.business_hour_end}
             initialDays={group.business_days}
             timezone={group.timezone}
+          />
+
+          {/* Operational context (textarea editable, inyectado a Sonnet) */}
+          <OperationalContextCard
+            groupId={group.id}
+            groupName={group.name}
+            initialContext={group.operational_context}
           />
 
           {/* Participants */}

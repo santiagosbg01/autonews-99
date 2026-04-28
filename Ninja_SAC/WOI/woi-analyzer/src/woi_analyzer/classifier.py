@@ -41,6 +41,7 @@ def _classify_and_persist(msg: MessageRow) -> bool:
             timestamp=msg.timestamp.isoformat(),
             context_messages=context,
             message_content=content,
+            operational_context=msg.group_operational_context,
         )
     except Exception as e:
         log.error("classify_failed", msg_id=msg.id, error=str(e))

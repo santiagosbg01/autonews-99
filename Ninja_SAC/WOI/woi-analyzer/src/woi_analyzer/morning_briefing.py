@@ -150,6 +150,19 @@ def run_morning_briefing(
         target_date, group_id=group_id, timezone_name=str(tz)
     )
 
+    # Inyectar contexto operacional del grupo (si existe) — Sonnet lo usa para
+    # interpretar correctamente jerga, SLAs y señales de incidente específicas
+    # del cliente. Ver groups.operational_context (migration 017).
+    if group_id is not None:
+        try:
+            from woi_analyzer.db import fetch_group_operational_context
+            op_ctx = fetch_group_operational_context(int(group_id))
+            if op_ctx:
+                input_data["operational_context"] = op_ctx
+        except Exception as e:
+            log.warning("operational_context_fetch_failed",
+                        group_id=group_id, error=str(e))
+
     try:
         briefing_json, usage = generate_morning_briefing(input_data)
     except Exception as e:

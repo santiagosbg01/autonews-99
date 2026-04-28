@@ -124,6 +124,26 @@ def _extract_json(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Classify
 # ---------------------------------------------------------------------------
+def _format_operational_context(operational_context: str | None) -> str:
+    """
+    Formatea el contexto operacional del grupo (groups.operational_context) para
+    inyección en prompts. Devuelve un bloque ya con headers o cadena vacía si no
+    hay contexto.
+    """
+    if not operational_context or not operational_context.strip():
+        return ""
+    trimmed = operational_context.strip()
+    # Cap defensivo: si alguien pega una novela en el textarea, recortamos a 4000
+    # chars para no inflar tokens de cada clasificación.
+    if len(trimmed) > 4000:
+        trimmed = trimmed[:4000].rsplit("\n", 1)[0] + "\n[...truncado...]"
+    return (
+        "OPERATIONAL CONTEXT (specific to this group — use it as ground truth "
+        "to disambiguate categories, urgency and incident open/close signals):\n"
+        f"{trimmed}\n\n"
+    )
+
+
 def _build_user_content(
     *,
     few_shot: str,
@@ -135,6 +155,7 @@ def _build_user_content(
     timestamp: str,
     context_messages: list[dict[str, Any]],
     message_content: str,
+    operational_context: str | None = None,
 ) -> str:
     ctx_lines = []
     for m in context_messages:
@@ -143,6 +164,8 @@ def _build_user_content(
         content = (m.get("content") or f"[{m.get('media_type') or 'media'}]")[:200]
         ctx_lines.append(f"[{role}] {name}: {content}")
     ctx_block = "\n".join(ctx_lines) if ctx_lines else "(sin mensajes previos recientes)"
+
+    op_ctx_block = _format_operational_context(operational_context)
 
     return (
         f"{few_shot}\n\n"
@@ -153,6 +176,7 @@ def _build_user_content(
         f"Sender role: {sender_role}\n"
         f"Sender phone (last 4): {sender_phone_last4}\n"
         f"Timestamp: {timestamp}\n"
+        f"{op_ctx_block}"
         f"Previous messages (chronological, oldest first):\n"
         f"{ctx_block}\n\n"
         f'Message to classify:\n"{message_content}"\n\n'
@@ -176,10 +200,13 @@ def classify_message(
     timestamp: str,
     context_messages: list[dict[str, Any]],
     message_content: str,
+    operational_context: str | None = None,
     model: str | None = None,
 ) -> tuple[ClassificationResult, dict[str, Any], dict[str, Any]]:
     """
     Clasifica un mensaje con Sonnet. Devuelve (result, claude_raw_dict, usage_dict).
+    `operational_context` (groups.operational_context) se inyecta en el prompt
+    para mejor desambiguación de categorías/urgencia específicas del cliente.
     `model` permite forzar un slug específico (por ejemplo para A/B testing); por
     defecto se usa CONFIG.anthropic.sonnet_model.
     """
@@ -196,6 +223,7 @@ def classify_message(
         timestamp=timestamp,
         context_messages=context_messages,
         message_content=message_content,
+        operational_context=operational_context,
     )
 
     chosen_model = model or CONFIG.anthropic.sonnet_model
@@ -264,6 +292,7 @@ def generate_incident_summary(
     ttfr_seconds: int | None,
     ttr_seconds: int | None,
     is_closed: bool,
+    operational_context: str | None = None,
 ) -> str:
     """Genera un resumen breve (2-3 oraciones) de un hilo de incidente con Sonnet."""
     system_prompt = _read_prompt("incident_summary.md")
@@ -284,7 +313,10 @@ def generate_incident_summary(
         f"Estado: {'cerrada operativamente' if is_closed else 'pendiente de cierre formal'}\n"
     )
 
+    op_ctx_block = _format_operational_context(operational_context)
+
     user_content = (
+        f"{op_ctx_block}"
         f"Metadatos del incidente:\n{meta}\n"
         f"Mensajes del hilo ({len(messages)} total):\n"
         + "\n".join(lines)
@@ -318,6 +350,7 @@ def generate_group_analysis(
     timezone: str,
     messages: list[dict[str, Any]],
     window_hours: int = 1,
+    operational_context: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Genera un análisis Sonnet del grupo para la ventana dada.
@@ -350,6 +383,8 @@ def generate_group_analysis(
 
     ctx = "\n".join(lines) if lines else "(Sin mensajes en este período)"
 
+    op_ctx_block = _format_operational_context(operational_context)
+
     user_content = (
         f"Grupo: {group_name}\n"
         f"Vertical: {vertical or 'desconocido'}\n"
@@ -357,6 +392,7 @@ def generate_group_analysis(
         f"Zona horaria: {timezone}\n"
         f"Ventana de análisis: últimas {window_hours}h\n"
         f"Total mensajes: {len(messages)}\n\n"
+        f"{op_ctx_block}"
         f"--- MENSAJES ---\n{ctx}\n\n"
         f"Genera el análisis JSON ahora."
     )
@@ -397,6 +433,7 @@ def ask_is_resolved(
     category: str | None,
     *,
     eod_mode: bool = False,
+    operational_context: str | None = None,
 ) -> dict:
     """
     Pregunta a Sonnet si el hilo de mensajes indica que el incidente fue resuelto.
@@ -489,7 +526,10 @@ def ask_is_resolved(
     else:
         system = system_base
 
+    op_ctx_block = _format_operational_context(operational_context)
+
     prompt = (
+        f"{op_ctx_block}"
         f"Categoría del incidente (clasificación inicial): {category or 'desconocida'}\n\n"
         f"Hilo cronológico ({len(lines)} mensajes):\n{thread}\n\n"
         f"{'¿Quedó resuelto este incidente al cierre del día?' if eod_mode else '¿Fue resuelto este incidente?'}"
