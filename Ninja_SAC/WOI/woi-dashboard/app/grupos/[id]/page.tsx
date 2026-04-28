@@ -127,6 +127,17 @@ export default async function GroupPage({ params, searchParams }: {
         </Link>
       </div>
 
+      {/* Contexto operacional — full-width, arriba para que sea lo primero
+          que se edita al entrar a un grupo. Se inyecta a Sonnet en cada
+          clasificación / análisis / briefing. */}
+      <div style={{ marginBottom: 16 }}>
+        <OperationalContextCard
+          groupId={group.id}
+          groupName={group.name}
+          initialContext={group.operational_context}
+        />
+      </div>
+
       {/* Churn risk alert (if any open signals) */}
       <ChurnAlertBanner signals={churnSignals} groupId={groupId} variant="banner" />
 
@@ -261,13 +272,6 @@ export default async function GroupPage({ params, searchParams }: {
             initialEnd={group.business_hour_end}
             initialDays={group.business_days}
             timezone={group.timezone}
-          />
-
-          {/* Operational context (textarea editable, inyectado a Sonnet) */}
-          <OperationalContextCard
-            groupId={group.id}
-            groupName={group.name}
-            initialContext={group.operational_context}
           />
 
           {/* Participants */}
