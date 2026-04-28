@@ -180,49 +180,6 @@ def mark_messages_analyzed(message_ids: list[int]) -> None:
         conn.commit()
 
 
-def insert_ground_truth_sample(
-    message_id: int,
-    sonnet_category: str,
-    sonnet_bucket: str,
-    sonnet_sentiment: float | None,
-    sonnet_urgency: str | None,
-    sonnet_reasoning: str | None,
-    sonnet_model: str,
-    haiku_category: str | None,
-    haiku_bucket: str | None,
-    haiku_sentiment: float | None,
-) -> None:
-    query = """
-        INSERT INTO ground_truth_samples (
-            message_id, sonnet_category, sonnet_bucket, sonnet_sentiment,
-            sonnet_urgency, sonnet_reasoning, sonnet_model,
-            haiku_category, haiku_bucket, haiku_sentiment
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-        )
-        ON CONFLICT (message_id) DO UPDATE SET
-            sonnet_category = EXCLUDED.sonnet_category,
-            sonnet_bucket = EXCLUDED.sonnet_bucket,
-            sonnet_sentiment = EXCLUDED.sonnet_sentiment,
-            sonnet_urgency = EXCLUDED.sonnet_urgency,
-            sonnet_reasoning = EXCLUDED.sonnet_reasoning,
-            sonnet_model = EXCLUDED.sonnet_model,
-            haiku_category = EXCLUDED.haiku_category,
-            haiku_bucket = EXCLUDED.haiku_bucket,
-            haiku_sentiment = EXCLUDED.haiku_sentiment
-    """
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            query,
-            (
-                message_id, sonnet_category, sonnet_bucket, sonnet_sentiment,
-                sonnet_urgency, sonnet_reasoning, sonnet_model,
-                haiku_category, haiku_bucket, haiku_sentiment,
-            ),
-        )
-        conn.commit()
-
-
 def fetch_incident_messages(message_ids: list[int]) -> list[dict[str, Any]]:
     """Retorna contenido de mensajes para generar un resumen de incidente."""
     if not message_ids:
@@ -278,14 +235,23 @@ def fetch_daily_report_input(report_date: datetime) -> dict[str, Any]:
         )
         totals = cur.fetchone() or {}
 
-        # Incidentes abiertos/cerrados hoy
+        # Incidentes abiertos/cerrados hoy.
+        # IMPORTANTE: avg_ttfr y avg_ttr se calculan sobre la MISMA población —
+        # tickets cerrados en la ventana — para que el promedio de TTR siempre
+        # sea ≥ promedio de TTFR (por ticket TTR≥TTFR siempre, y al alinear el
+        # subset evitamos selection bias). Ambos valores están en SEGUNDOS DE
+        # HORARIO LABORAL (ver business_hours.py).
         cur.execute(
             """
             SELECT
                 COUNT(*) FILTER (WHERE opened_at BETWEEN %s AND %s) AS opened_today,
                 COUNT(*) FILTER (WHERE closed_at BETWEEN %s AND %s) AS closed_today,
-                ROUND(AVG(ttfr_seconds)::NUMERIC / 60, 1) FILTER (WHERE opened_at BETWEEN %s AND %s) AS avg_ttfr_min,
-                ROUND(AVG(ttr_seconds)::NUMERIC / 60, 1) FILTER (WHERE closed_at BETWEEN %s AND %s) AS avg_ttr_min
+                ROUND(AVG(ttfr_seconds)::NUMERIC / 60, 1) FILTER (
+                    WHERE closed_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
+                ) AS avg_ttfr_min,
+                ROUND(AVG(ttr_seconds)::NUMERIC / 60, 1) FILTER (
+                    WHERE closed_at BETWEEN %s AND %s AND ttr_seconds IS NOT NULL
+                ) AS avg_ttr_min
             FROM incidents
             """,
             (day_start, day_end, day_start, day_end, day_start, day_end, day_start, day_end),
@@ -308,7 +274,8 @@ def fetch_daily_report_input(report_date: datetime) -> dict[str, Any]:
         )
         open_incidents = cur.fetchall()
 
-        # Agentes en zona roja (TTFR > 30min hoy)
+        # Agentes en zona roja (TTFR business-hours > 30min hoy).
+        # Solo cuenta tickets ya cerrados para población consistente.
         cur.execute(
             """
             SELECT i.first_response_by AS agent_phone,
@@ -317,8 +284,9 @@ def fetch_daily_report_input(report_date: datetime) -> dict[str, Any]:
                    ROUND(AVG(i.ttfr_seconds)::NUMERIC / 60, 1) AS avg_ttfr_min
             FROM incidents i
             LEFT JOIN participants p ON p.phone = i.first_response_by AND p.group_id = i.group_id
-            WHERE i.opened_at BETWEEN %s AND %s
+            WHERE i.closed_at BETWEEN %s AND %s
               AND i.first_response_by IS NOT NULL
+              AND i.ttfr_seconds IS NOT NULL
             GROUP BY i.first_response_by, p.display_name
             HAVING AVG(i.ttfr_seconds) > 1800
             ORDER BY avg_ttfr_min DESC
@@ -361,7 +329,6 @@ def insert_daily_report(
     report_date: datetime,
     data: dict[str, Any],
     narrative: str,
-    haiku_consistency_pct: float | None,
 ) -> None:
     totals = data.get("totals", {})
     inc = data.get("incident_stats", {})
@@ -369,6 +336,9 @@ def insert_daily_report(
     bucket_b = totals.get("bucket_b") or 0
     ratio_b = round(bucket_b / total, 4) if total > 0 else None
 
+    # NOTA: la columna `haiku_consistency_pct` se mantiene en el schema por
+    # compatibilidad con históricos, pero ya no se actualiza (todo el pipeline
+    # corre con Sonnet). Ver migration 015.
     query = """
         INSERT INTO daily_reports (
             report_date, total_messages,
@@ -376,9 +346,9 @@ def insert_daily_report(
             incidents_opened, incidents_closed,
             avg_ttfr_seconds, avg_ttr_seconds,
             top_incidents_json, agents_red_zone_json, groups_at_risk_json,
-            sonnet_narrative, haiku_consistency_pct
+            sonnet_narrative
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (report_date) DO UPDATE SET
             total_messages       = EXCLUDED.total_messages,
@@ -394,7 +364,6 @@ def insert_daily_report(
             agents_red_zone_json = EXCLUDED.agents_red_zone_json,
             groups_at_risk_json  = EXCLUDED.groups_at_risk_json,
             sonnet_narrative     = EXCLUDED.sonnet_narrative,
-            haiku_consistency_pct = EXCLUDED.haiku_consistency_pct,
             generated_at         = NOW()
     """
 
@@ -424,26 +393,9 @@ def insert_daily_report(
                 json.dumps([r for r in data.get("agents_red_zone", [])], default=str),
                 json.dumps([r for r in data.get("groups_at_risk", [])], default=str),
                 narrative,
-                haiku_consistency_pct,
             ),
         )
         conn.commit()
-
-
-def compute_haiku_consistency(days: int = 1) -> float | None:
-    """Devuelve % de match_category de las muestras ground_truth de los últimos N días."""
-    query = """
-        SELECT
-            COUNT(*) FILTER (WHERE match_category)::FLOAT
-            / NULLIF(COUNT(*), 0) * 100 AS pct
-        FROM ground_truth_samples
-        WHERE created_at >= NOW() - make_interval(days => %s)
-          AND haiku_category IS NOT NULL
-    """
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(query, (days,))
-        row = cur.fetchone()
-    return row["pct"] if row and row["pct"] is not None else None
 
 
 def upsert_group_kpi_snapshot(
@@ -524,19 +476,23 @@ def compute_group_kpis_for_date(group_id: int, day: datetime) -> dict[str, Any]:
         """, (group_id, day_start, day_end))
         msg = cur.fetchone() or {}
 
-        # Incident stats + TTFR percentiles
+        # Incident stats + TTFR percentiles.
+        # avg_ttfr, avg_ttr y p90_ttfr se computan sobre la misma población
+        # (tickets cerrados en la ventana) para evitar selection bias entre
+        # tickets que cerraron rápido vs los que aún están abiertos. Los
+        # valores son SEGUNDOS DE HORARIO LABORAL (ver business_hours.py).
         cur.execute("""
             SELECT
                 COUNT(*) FILTER (WHERE opened_at BETWEEN %s AND %s)        AS opened,
                 COUNT(*) FILTER (WHERE closed_at BETWEEN %s AND %s)        AS closed,
                 ROUND(AVG(ttfr_seconds) FILTER (
-                    WHERE opened_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
+                    WHERE closed_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
                 ))::INT                                                     AS avg_ttfr,
                 ROUND(AVG(ttr_seconds) FILTER (
                     WHERE closed_at BETWEEN %s AND %s AND ttr_seconds IS NOT NULL
                 ))::INT                                                     AS avg_ttr,
                 PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY ttfr_seconds)
-                    FILTER (WHERE opened_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL)::INT
+                    FILTER (WHERE closed_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL)::INT
                                                                             AS p90_ttfr
             FROM incidents
             WHERE group_id = %s
@@ -782,6 +738,9 @@ def fetch_morning_briefing_input(
         )
         msg_stats = cur.fetchone() or {}
 
+        # avg_ttfr_seconds del briefing matutino: filtramos por closed_at
+        # para alinear población con TTR en otros queries (ver
+        # business_hours.py / fix de TTFR-TTR del 2026-04-27).
         cur.execute(
             f"""
             SELECT
@@ -789,7 +748,7 @@ def fetch_morning_briefing_input(
                 COUNT(*) FILTER (WHERE closed_at BETWEEN %s AND %s)                 AS incidents_resolved,
                 COUNT(*) FILTER (WHERE escalated_at BETWEEN %s AND %s)              AS incidents_escalated,
                 ROUND(AVG(ttfr_seconds) FILTER (
-                    WHERE opened_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
+                    WHERE closed_at BETWEEN %s AND %s AND ttfr_seconds IS NOT NULL
                 ))::INT                                                              AS avg_ttfr_seconds
             FROM incidents
             WHERE (opened_at BETWEEN %s AND %s OR closed_at BETWEEN %s AND %s)
@@ -908,6 +867,7 @@ def fetch_morning_briefing_input(
         recurring_problems = cur.fetchall()
 
         # ── Agents in red zone yesterday ──────────────────────────────────
+        # TTFR business-hours > 30min sobre tickets cerrados ayer.
         cur.execute(
             f"""
             SELECT i.first_response_by AS agent_phone,
@@ -917,7 +877,7 @@ def fetch_morning_briefing_input(
             FROM incidents i
             LEFT JOIN participants p
                    ON p.phone = i.first_response_by AND p.group_id = i.group_id
-            WHERE i.opened_at BETWEEN %s AND %s
+            WHERE i.closed_at BETWEEN %s AND %s
               AND i.first_response_by IS NOT NULL
               AND i.ttfr_seconds IS NOT NULL
               {group_filter_inc}

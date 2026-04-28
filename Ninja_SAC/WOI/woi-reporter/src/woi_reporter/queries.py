@@ -91,7 +91,11 @@ def fetch_open_incidents(limit: int = 10) -> list[dict[str, Any]]:
 
 
 def fetch_agents_red_zone(ttfr_threshold_min: int = 30, days: int = 7) -> list[dict[str, Any]]:
-    """Agentes con TTFR promedio >N min en incidentes cerrados últimos N días."""
+    """
+    Agentes con TTFR promedio (horario laboral) > ttfr_threshold_min sobre
+    tickets CERRADOS en los últimos N días. Filtramos por closed_at para
+    alinear población con TTR (ver business_hours.py / fix TTFR-TTR).
+    """
     query = """
         SELECT
             i.first_response_by AS agent_phone,
@@ -99,14 +103,15 @@ def fetch_agents_red_zone(ttfr_threshold_min: int = 30, days: int = 7) -> list[d
             COUNT(*) AS incidents_attended,
             ROUND(AVG(i.ttfr_seconds)::NUMERIC / 60, 2) AS ttfr_avg_min,
             ROUND(AVG(i.ttr_seconds)::NUMERIC / 60, 2) AS ttr_avg_min,
-            COUNT(*) FILTER (WHERE i.closed_at IS NOT NULL) AS resolved_count
+            COUNT(*) AS resolved_count
         FROM incidents i
         LEFT JOIN participants p
           ON p.phone = i.first_response_by
          AND p.group_id = i.group_id
-        WHERE i.opened_at >= NOW() - make_interval(days => %s)
+        WHERE i.closed_at >= NOW() - make_interval(days => %s)
           AND i.first_response_by IS NOT NULL
           AND i.ttfr_seconds IS NOT NULL
+          AND i.ttr_seconds  IS NOT NULL
         GROUP BY i.first_response_by, p.display_name
         HAVING AVG(i.ttfr_seconds)/60 > %s
         ORDER BY ttfr_avg_min DESC
@@ -117,13 +122,28 @@ def fetch_agents_red_zone(ttfr_threshold_min: int = 30, days: int = 7) -> list[d
 
 
 def fetch_agent_leaderboard(days: int = 7) -> list[dict[str, Any]]:
+    """
+    Leaderboard de agentes (últimos N días):
+    - incidents_attended: tickets en los que este agente fue first_response_by.
+    - resolved_count + resolution_rate_pct: cuántos de esos cerraron.
+    - ttfr_avg_min / ttr_avg_min: promedios SOLO sobre tickets cerrados (poblacion
+      alineada para que TTR ≥ TTFR siempre). Valores en SEGUNDOS DE HORARIO LABORAL.
+    """
     query = """
         SELECT
             i.first_response_by AS agent_phone,
             COALESCE(p.display_name, i.first_response_by) AS agent_name,
             COUNT(*) AS incidents_attended,
-            ROUND(AVG(i.ttfr_seconds)::NUMERIC / 60, 2) AS ttfr_avg_min,
-            ROUND(AVG(i.ttr_seconds)::NUMERIC / 60, 2) AS ttr_avg_min,
+            ROUND(AVG(i.ttfr_seconds) FILTER (
+                WHERE i.closed_at IS NOT NULL
+                  AND i.ttfr_seconds IS NOT NULL
+                  AND i.ttr_seconds  IS NOT NULL
+            )::NUMERIC / 60, 2) AS ttfr_avg_min,
+            ROUND(AVG(i.ttr_seconds) FILTER (
+                WHERE i.closed_at IS NOT NULL
+                  AND i.ttfr_seconds IS NOT NULL
+                  AND i.ttr_seconds  IS NOT NULL
+            )::NUMERIC / 60, 2) AS ttr_avg_min,
             COUNT(*) FILTER (WHERE i.closed_at IS NOT NULL) AS resolved_count,
             ROUND(
                 COUNT(*) FILTER (WHERE i.closed_at IS NOT NULL)::NUMERIC
@@ -166,54 +186,6 @@ def fetch_raw_sample(report_date: date, limit: int = 20) -> list[dict[str, Any]]
         return cur.fetchall()
 
 
-def fetch_haiku_sonnet_diffs(report_date: date, limit: int = 10) -> list[dict[str, Any]]:
-    """Muestras ground-truth del día donde Haiku y Sonnet DIFIEREN — útiles para calibrar."""
-    query = """
-        SELECT
-            gts.message_id,
-            m.content,
-            m.sender_role,
-            g.name AS group_name,
-            gts.haiku_category, gts.haiku_bucket, gts.haiku_sentiment,
-            gts.sonnet_category, gts.sonnet_bucket, gts.sonnet_sentiment,
-            gts.sonnet_reasoning,
-            gts.santi_review
-        FROM ground_truth_samples gts
-        JOIN messages m ON m.id = gts.message_id
-        JOIN groups g   ON g.id = m.group_id
-        WHERE (m.timestamp AT TIME ZONE g.timezone)::date = %s
-          AND gts.match_category = FALSE
-        ORDER BY gts.created_at DESC
-        LIMIT %s
-    """
-    with _connect() as conn, conn.cursor() as cur:
-        cur.execute(query, (report_date, limit))
-        return cur.fetchall()
-
-
-def fetch_haiku_consistency_today(report_date: date) -> dict[str, Any]:
-    query = """
-        SELECT
-            COUNT(*) AS sample_size,
-            ROUND(
-                COUNT(*) FILTER (WHERE match_category)::NUMERIC
-                / NULLIF(COUNT(*), 0) * 100, 2
-            ) AS consistency_pct,
-            ROUND(
-                COUNT(*) FILTER (WHERE match_bucket)::NUMERIC
-                / NULLIF(COUNT(*), 0) * 100, 2
-            ) AS bucket_match_pct
-        FROM ground_truth_samples gts
-        JOIN messages m ON m.id = gts.message_id
-        JOIN groups g   ON g.id = m.group_id
-        WHERE (m.timestamp AT TIME ZONE g.timezone)::date = %s
-          AND gts.haiku_category IS NOT NULL
-    """
-    with _connect() as conn, conn.cursor() as cur:
-        cur.execute(query, (report_date,))
-        return cur.fetchone() or {"sample_size": 0, "consistency_pct": None, "bucket_match_pct": None}
-
-
 def upsert_daily_report_log(
     report_date: date,
     overview: dict,
@@ -221,7 +193,6 @@ def upsert_daily_report_log(
     agents_red: list[dict],
     groups_at_risk: list[dict],
     narrative: str,
-    consistency: dict,
     sheet_url: str,
 ) -> None:
     query = """
@@ -229,12 +200,12 @@ def upsert_daily_report_log(
             report_date, total_messages, bucket_a_count, bucket_b_count, bucket_c_count,
             ratio_b, incidents_opened, incidents_closed,
             top_incidents_json, agents_red_zone_json, groups_at_risk_json,
-            sonnet_narrative, haiku_consistency_pct, sheet_url, slack_delivered
+            sonnet_narrative, sheet_url, slack_delivered
         ) VALUES (
             %(date)s, %(total)s, %(a)s, %(b)s, %(c)s,
             %(ratio)s, %(opened)s, %(closed)s,
             %(incidents)s::jsonb, %(agents)s::jsonb, %(groups)s::jsonb,
-            %(narrative)s, %(consistency)s, %(sheet_url)s, TRUE
+            %(narrative)s, %(sheet_url)s, TRUE
         )
         ON CONFLICT (report_date) DO UPDATE SET
             total_messages = EXCLUDED.total_messages,
@@ -246,7 +217,6 @@ def upsert_daily_report_log(
             agents_red_zone_json = EXCLUDED.agents_red_zone_json,
             groups_at_risk_json = EXCLUDED.groups_at_risk_json,
             sonnet_narrative = EXCLUDED.sonnet_narrative,
-            haiku_consistency_pct = EXCLUDED.haiku_consistency_pct,
             sheet_url = EXCLUDED.sheet_url,
             generated_at = NOW()
     """
@@ -267,7 +237,6 @@ def upsert_daily_report_log(
                 "agents": json.dumps(agents_red, default=str),
                 "groups": json.dumps(groups_at_risk, default=str),
                 "narrative": narrative,
-                "consistency": consistency.get("consistency_pct"),
                 "sheet_url": sheet_url,
             },
         )

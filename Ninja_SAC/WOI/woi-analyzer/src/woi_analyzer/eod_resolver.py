@@ -28,6 +28,7 @@ from typing import Any
 
 import pytz
 
+from woi_analyzer.business_hours import business_seconds_between
 from woi_analyzer.claude_client import ask_is_resolved
 from woi_analyzer.db import connect, list_active_groups_with_timezones
 from woi_analyzer.logging_setup import log
@@ -64,7 +65,7 @@ def _fetch_open_tickets_for_group(group_id: int) -> list[dict[str, Any]]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, opened_at, category, urgency, status, first_response_at
+            SELECT id, opened_at, category, urgency, status, first_response_at, timezone
             FROM incidents
             WHERE group_id = %s
               AND closed_at IS NULL
@@ -93,20 +94,30 @@ def _fetch_thread(incident_id: int, limit: int = 30) -> list[dict[str, Any]]:
         return list(reversed(cur.fetchall()))
 
 
-def _close_resolved(cur, incident_id: int, reason: str, prev_status: str | None) -> None:
+def _close_resolved(
+    cur,
+    incident_id: int,
+    reason: str,
+    prev_status: str | None,
+    opened_at: datetime,
+    tz_name: str | None,
+) -> None:
+    closed_now = datetime.now().astimezone()
+    ttr_sec = business_seconds_between(opened_at, closed_now, tz_name)
     cur.execute(
         """
         UPDATE incidents
         SET status            = 'resuelto',
-            closed_at         = NOW(),
-            resolution_at     = NOW(),
+            closed_at         = %s,
+            resolution_at     = %s,
             resolution_source = 'eod_resolved',
             resolution_reason = %s,
+            ttr_seconds       = %s,
             sonnet_checked_at = NOW(),
             updated_at        = NOW()
         WHERE id = %s
         """,
-        (reason[:200], incident_id),
+        (closed_now, closed_now, reason[:200], ttr_sec, incident_id),
     )
     _log_status_change(
         cur, incident_id, prev_status, "resuelto",
@@ -116,22 +127,30 @@ def _close_resolved(cur, incident_id: int, reason: str, prev_status: str | None)
 
 
 def _close_unresolved_eod(
-    cur, incident_id: int, reason: str, prev_status: str | None
+    cur,
+    incident_id: int,
+    reason: str,
+    prev_status: str | None,
+    opened_at: datetime,
+    tz_name: str | None,
 ) -> None:
     fallback = reason or "Cerró el día sin evidencia de resolución de la queja original."
+    closed_now = datetime.now().astimezone()
+    ttr_sec = business_seconds_between(opened_at, closed_now, tz_name)
     cur.execute(
         """
         UPDATE incidents
         SET status            = 'no_resuelto_eod',
-            closed_at         = NOW(),
-            resolution_at     = NOW(),
+            closed_at         = %s,
+            resolution_at     = %s,
             resolution_source = 'eod_unresolved',
             resolution_reason = %s,
+            ttr_seconds       = %s,
             sonnet_checked_at = NOW(),
             updated_at        = NOW()
         WHERE id = %s
         """,
-        (fallback[:200], incident_id),
+        (closed_now, closed_now, fallback[:200], ttr_sec, incident_id),
     )
     _log_status_change(
         cur, incident_id, prev_status, "no_resuelto_eod",
@@ -164,6 +183,8 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
     for t in open_tickets:
         incident_id = t["id"]
         prev_status = t.get("status")
+        opened_at = t["opened_at"]
+        tz_name = t.get("timezone")
         try:
             msgs = _fetch_thread(incident_id)
             if not msgs:
@@ -172,7 +193,7 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
                     _close_unresolved_eod(
                         cur, incident_id,
                         "Ticket sin mensajes asociados al cierre del día.",
-                        prev_status,
+                        prev_status, opened_at, tz_name,
                     )
                     conn.commit()
                 unresolved += 1
@@ -181,10 +202,16 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
             verdict = ask_is_resolved(msgs, t.get("category"), eod_mode=True)
             with connect() as conn, conn.cursor() as cur:
                 if verdict["resolved"]:
-                    _close_resolved(cur, incident_id, verdict["reason"], prev_status)
+                    _close_resolved(
+                        cur, incident_id, verdict["reason"], prev_status,
+                        opened_at, tz_name,
+                    )
                     resolved += 1
                 else:
-                    _close_unresolved_eod(cur, incident_id, verdict["reason"], prev_status)
+                    _close_unresolved_eod(
+                        cur, incident_id, verdict["reason"], prev_status,
+                        opened_at, tz_name,
+                    )
                     unresolved += 1
                 conn.commit()
         except Exception as e:

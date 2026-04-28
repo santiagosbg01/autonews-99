@@ -360,12 +360,14 @@ export async function getGroupsSummary(): Promise<GroupSummary[]> {
       const incidents_total_7d = incidents.length
       const incidents_resolved_7d = incidents.filter((i: any) => i.closed_at != null).length
       const incidents_escalated_7d = incidents.filter((i: any) => i.escalated_at != null).length
-      const ttfrs = incidents.map((i: any) => i.ttfr_seconds).filter((s: any) => s !== null)
+      // TTFR/TTR (horario laboral) — promedios SOLO sobre tickets cerrados para
+      // que la población esté alineada (TTR ≥ TTFR garantizado).
+      const closedIncs = incidents.filter((i: any) => i.closed_at != null)
+      const ttfrs = closedIncs.map((i: any) => i.ttfr_seconds).filter((s: any) => s !== null)
       const avg_ttfr_minutes = ttfrs.length > 0
         ? Math.round(ttfrs.reduce((a: number, b: number) => a + b, 0) / ttfrs.length / 60)
         : null
-      // TTR = total time-to-resolution (only counts closed incidents)
-      const ttrs = incidents.map((i: any) => i.ttr_seconds).filter((s: any) => s !== null)
+      const ttrs = closedIncs.map((i: any) => i.ttr_seconds).filter((s: any) => s !== null)
       const avg_ttr_minutes = ttrs.length > 0
         ? Math.round(ttrs.reduce((a: number, b: number) => a + b, 0) / ttrs.length / 60)
         : null
@@ -1013,14 +1015,13 @@ export type DailyReport = {
   incidents_closed: number
   avg_ttfr_seconds: number | null
   sonnet_narrative: string | null
-  haiku_consistency_pct: number | null
   generated_at: string
 }
 
 export async function getDailyReports(limit = 14): Promise<DailyReport[]> {
   const { data, error } = await supabaseAdmin
     .from('daily_reports')
-    .select('id, report_date, total_messages, bucket_a_count, bucket_b_count, bucket_c_count, ratio_b, incidents_opened, incidents_closed, avg_ttfr_seconds, sonnet_narrative, haiku_consistency_pct, generated_at')
+    .select('id, report_date, total_messages, bucket_a_count, bucket_b_count, bucket_c_count, ratio_b, incidents_opened, incidents_closed, avg_ttfr_seconds, sonnet_narrative, generated_at')
     .order('report_date', { ascending: false })
     .limit(limit)
   if (error) return []
@@ -1323,9 +1324,13 @@ export async function getIncidentCategoryBreakdown(days = 30): Promise<CategoryB
     if (row.urgency === 'alta')  map[cat].alta++
     if (row.urgency === 'media') map[cat].media++
     if (row.urgency === 'baja')  map[cat].baja++
-    if (row.ttfr_seconds != null) map[cat].ttfrs.push(row.ttfr_seconds)
-    if (row.ttr_seconds  != null) map[cat].ttrs.push(row.ttr_seconds)
-    if (row.closed_at) map[cat].closed++
+    // Promedios TTFR/TTR (horario laboral) sólo sobre tickets cerrados —
+    // alinea población para que TTR ≥ TTFR siempre.
+    if (row.closed_at) {
+      if (row.ttfr_seconds != null) map[cat].ttfrs.push(row.ttfr_seconds)
+      if (row.ttr_seconds  != null) map[cat].ttrs.push(row.ttr_seconds)
+      map[cat].closed++
+    }
   }
 
   const total = Object.values(map).reduce((s, v) => s + v.count, 0)
@@ -1417,9 +1422,11 @@ export async function getGlobalKPIs(range: RangeKey, from?: string, to?: string)
   if (t) incQ = incQ.lte('opened_at', t.toISOString())
   const { data: incData, count: incCount } = await incQ
 
-  // 4. Avg TTFR (first-response) and TTR (resolution) from incidents in range
-  const ttfrs = (incData ?? []).map((r: any) => r.ttfr_seconds).filter((v: any) => v != null) as number[]
-  const ttrs  = (incData ?? []).map((r: any) => r.ttr_seconds).filter((v: any) => v != null) as number[]
+  // 4. Avg TTFR / TTR (horario laboral) — solo sobre tickets CERRADOS para
+  // alinear poblaciones y garantizar TTR ≥ TTFR. Ver business_hours.py.
+  const closedIncidents = (incData ?? []).filter((r: any) => r.closed_at != null)
+  const ttfrs = closedIncidents.map((r: any) => r.ttfr_seconds).filter((v: any) => v != null) as number[]
+  const ttrs  = closedIncidents.map((r: any) => r.ttr_seconds ).filter((v: any) => v != null) as number[]
   const avgTtfr = ttfrs.length > 0
     ? Math.round(ttfrs.reduce((a, b) => a + b, 0) / ttfrs.length / 60)
     : null
@@ -2404,9 +2411,13 @@ export async function getTtfrByCategory(
     if (row.urgency === 'alta')  b.alta++
     if (row.urgency === 'media') b.media++
     if (row.urgency === 'baja')  b.baja++
-    if (row.ttfr_seconds != null) b.ttfrs.push(row.ttfr_seconds)
-    if (row.ttr_seconds  != null) b.ttrs.push(row.ttr_seconds)
-    if (row.closed_at != null)    b.resolved++
+    // TTFR/TTR (horario laboral) — sólo acumulamos si el ticket cerró, para
+    // mantener los promedios de TTFR y TTR sobre la misma población.
+    if (row.closed_at != null) {
+      if (row.ttfr_seconds != null) b.ttfrs.push(row.ttfr_seconds)
+      if (row.ttr_seconds  != null) b.ttrs.push(row.ttr_seconds)
+      b.resolved++
+    }
     if (row.escalated_at != null) b.escalated++
     if (row.is_open === true)     b.open++
   }
@@ -2440,7 +2451,7 @@ export async function getTtfrByCategory(
 }
 
 // ─── Classification feedback (T07) ──────────────────────────────────────────
-// Human-in-the-loop corrections to Sonnet/Haiku classification on incidents.
+// Human-in-the-loop corrections to Sonnet classification on incidents.
 // Each row in classification_feedback represents one field-level override.
 
 export type FeedbackField = 'category' | 'urgency' | 'sentiment' | 'bucket' | 'summary' | 'other'

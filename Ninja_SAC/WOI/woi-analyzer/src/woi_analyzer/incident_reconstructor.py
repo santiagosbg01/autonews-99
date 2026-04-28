@@ -2,8 +2,8 @@
 Incident reconstruction v0 — heurístico simple para V1.
 
 V1 no intenta ser perfecto; solo aprovechar los flags is_incident_open/close que
-Haiku ya puso en cada mensaje. Cada 'open' sin close-previo-pendiente abre un
-incident, y el siguiente 'close' del mismo owner en ≤72h lo cierra.
+Sonnet ya puso en cada mensaje al clasificar. Cada 'open' sin close-previo-pendiente
+abre un incident, y el siguiente 'close' del mismo owner en ≤72h lo cierra.
 
 Después del T0 spike (semanas 1-2) este módulo se puede reemplazar por un
 clustering semántico si el resultado baseline es insuficiente.
@@ -19,6 +19,7 @@ from psycopg.rows import dict_row
 
 from datetime import timezone as _tz
 
+from woi_analyzer.business_hours import business_seconds_between
 from woi_analyzer.claude_client import generate_incident_summary, ask_is_resolved
 from woi_analyzer.db import connect, fetch_incident_messages, update_incident_summary
 from woi_analyzer.logging_setup import log
@@ -178,16 +179,16 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
             inc = open_incidents[most_recent_owner]
             inc.message_ids.append(m["id"])
 
-            # First response: primer mensaje de agente_99 después de la apertura
+            # First response: cualquier mensaje de agente_99 después de la apertura
+            # cuenta como acuse del ticket. No filtramos por categoría porque en
+            # operación "respondió" significa "el equipo 99 leyó/acusó", no
+            # importa si fue saludo, acuse explícito, o ya un cierre directo.
+            # (Antes filtrábamos por categorías específicas, lo que dejaba
+            # tickets con ttr_seconds set pero ttfr_seconds NULL — ver migration
+            # 015 y el cambio 2026-04-27 sobre TTFR/TTR business-hours.)
             if (
                 inc.first_response_at is None
                 and m["sender_role"] == "agente_99"
-                and m["category"] in {
-                    "acuse_recibo", "confirmacion_resolucion",
-                    "problema_unidad", "problema_horario", "problema_entrada",
-                    "problema_salida", "problema_trafico", "problema_manifestacion",
-                    "robo_incidencia", "problema_sistema", "problema_proveedor",
-                }
             ):
                 inc.first_response_at = ts
                 inc.first_response_by = owner
@@ -250,12 +251,21 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
 
     with connect() as conn, conn.cursor() as cur:
         for c in candidates:
-            ttfr = None
-            if c.first_response_at:
-                ttfr = int((c.first_response_at - c.opened_at).total_seconds())
-            ttr = None
-            if c.closed_at:
-                ttr = int((c.closed_at - c.opened_at).total_seconds())
+            # TTFR / TTR se miden en SEGUNDOS DE HORARIO LABORAL (business_hours.py)
+            # del timezone del grupo. Esto evita inflar las métricas con horas no
+            # operativas (madrugada, fin de semana opcional) y garantiza que
+            # TTR ≥ TTFR a nivel ticket porque ambos parten de opened_at y
+            # first_response_at ≤ closed_at siempre.
+            ttfr = (
+                business_seconds_between(c.opened_at, c.first_response_at, c.timezone)
+                if c.first_response_at
+                else None
+            )
+            ttr = (
+                business_seconds_between(c.opened_at, c.closed_at, c.timezone)
+                if c.closed_at
+                else None
+            )
 
             status, escalated_reason = _derive_status(
                 closed_at=c.closed_at,
@@ -368,8 +378,16 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
             try:
                 msgs = fetch_incident_messages(c.message_ids)
                 if msgs:
-                    ttfr_sec = int((c.first_response_at - c.opened_at).total_seconds()) if c.first_response_at else None
-                    ttr_sec = int((c.closed_at - c.opened_at).total_seconds()) if c.closed_at else None
+                    ttfr_sec = (
+                        business_seconds_between(c.opened_at, c.first_response_at, c.timezone)
+                        if c.first_response_at
+                        else None
+                    )
+                    ttr_sec = (
+                        business_seconds_between(c.opened_at, c.closed_at, c.timezone)
+                        if c.closed_at
+                        else None
+                    )
                     summary = generate_incident_summary(
                         messages=msgs,
                         category=c.category,
@@ -419,12 +437,12 @@ def refresh_open_ticket_statuses() -> int:
     inactivity_cutoff = now - timedelta(hours=INACTIVITY_RESOLVE_HOURS)
 
     with connect() as conn, conn.cursor() as cur:
-        # Fetch open/in-progress tickets + last message timestamp
+        # Fetch open/in-progress tickets + last message timestamp + tz
         cur.execute(
             """
             SELECT
                 i.id, i.opened_at, i.first_response_at, i.closed_at,
-                i.urgency, i.status, i.escalated_at,
+                i.urgency, i.status, i.escalated_at, i.timezone,
                 MAX(m.timestamp) AS last_msg_at
             FROM incidents i
             LEFT JOIN analysis a ON a.incident_id = i.id
@@ -451,6 +469,9 @@ def refresh_open_ticket_statuses() -> int:
                 and old_status not in ("resuelto", "escalado")
             ):
                 reason = f"Sin actividad por {INACTIVITY_RESOLVE_HOURS}h tras respuesta del agente."
+                ttr_sec = business_seconds_between(
+                    row["opened_at"], last_msg_at, row.get("timezone")
+                )
                 cur.execute(
                     """
                     UPDATE incidents
@@ -459,10 +480,11 @@ def refresh_open_ticket_statuses() -> int:
                         resolution_at     = %s,
                         resolution_source = COALESCE(resolution_source, 'inactivity'),
                         resolution_reason = COALESCE(resolution_reason, %s),
+                        ttr_seconds       = %s,
                         updated_at        = NOW()
                     WHERE id = %s
                     """,
-                    (last_msg_at, last_msg_at, reason, incident_id),
+                    (last_msg_at, last_msg_at, reason, ttr_sec, incident_id),
                 )
                 _log_status_change(cur, incident_id, old_status, "resuelto", reason, "auto")
                 updated += 1
@@ -515,7 +537,7 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT i.id, i.opened_at, i.category, i.urgency, i.status
+            SELECT i.id, i.opened_at, i.category, i.urgency, i.status, i.timezone
             FROM incidents i
             WHERE i.status NOT IN ('resuelto', 'escalado', 'no_resuelto_eod')
               AND i.closed_at IS NULL
@@ -559,18 +581,23 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
                 # Only act on confident verdicts. Low confidence stays open and
                 # gets a fresh check after cooldown.
                 if verdict["resolved"] and verdict["confidence"] in ("alta", "media"):
+                    closed_now = datetime.now().astimezone()
+                    ttr_sec = business_seconds_between(
+                        ticket["opened_at"], closed_now, ticket.get("timezone")
+                    )
                     cur3.execute(
                         """
                         UPDATE incidents
                         SET status            = 'resuelto',
-                            closed_at         = NOW(),
-                            resolution_at     = NOW(),
+                            closed_at         = %s,
+                            resolution_at     = %s,
                             resolution_source = 'sonnet_thread',
                             resolution_reason = %s,
+                            ttr_seconds       = %s,
                             updated_at        = NOW()
                         WHERE id = %s
                         """,
-                        (verdict["reason"], incident_id),
+                        (closed_now, closed_now, verdict["reason"], ttr_sec, incident_id),
                     )
                     _log_status_change(
                         cur3, incident_id, ticket.get("status", "pendiente"),
