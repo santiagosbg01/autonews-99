@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 import {
   updateGroupBusinessHours,
   updateGroupOperationalContext,
+  setParticipantPrimary,
   VALID_BUSINESS_DAYS,
 } from '@/lib/queries'
 
@@ -45,6 +46,21 @@ export async function saveOperationalContextAction(formData: FormData): Promise<
   const result = await updateGroupOperationalContext(groupId, context)
   if (!result.ok) return result
 
+  revalidatePath(`/grupos/${groupId}`)
+  return { ok: true }
+}
+
+export async function setPrimaryAction(input: {
+  participantId: number
+  isPrimary: boolean
+  groupId: number
+}): Promise<{ ok: boolean; error?: string }> {
+  const { participantId, isPrimary, groupId } = input
+  if (!Number.isFinite(participantId) || participantId <= 0) {
+    return { ok: false, error: 'participantId inválido' }
+  }
+  const result = await setParticipantPrimary(participantId, isPrimary)
+  if (!result.ok) return result
   revalidatePath(`/grupos/${groupId}`)
   return { ok: true }
 }

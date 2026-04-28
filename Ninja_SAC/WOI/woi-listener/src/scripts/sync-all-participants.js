@@ -32,7 +32,12 @@ import {
 } from '@whiskeysockets/baileys';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { upsertGroup, upsertParticipant, reconcileGroupParticipants } from '../supabase.js';
+import {
+  upsertGroup,
+  upsertParticipant,
+  reconcileGroupParticipants,
+  autoPromoteAgents
+} from '../supabase.js';
 
 const log = logger.child({ module: 'sync-participants' });
 
@@ -258,6 +263,21 @@ async function main() {
       stats.errors += 1;
       log.error({ err, groupId: g.id, subject: g.subject }, 'Failed to sync group');
     }
+  }
+
+  // Auto-promoción: cualquier phone que esté en >1 grupo con role='otro' (o
+  // null) pasa a 'agente_99'. Una persona externa al equipo nunca está en
+  // múltiples chats internos. Idempotente: si ya fue promovido en runs
+  // previos, no hace nada.
+  try {
+    const { promoted } = await autoPromoteAgents();
+    stats.autoPromotedAgents = promoted;
+    if (promoted > 0) {
+      log.info({ promoted }, 'Auto-promoted multi-group phones to agente_99');
+    }
+  } catch (err) {
+    stats.errors += 1;
+    log.warn({ err }, 'autoPromoteAgents failed');
   }
 
   log.info(stats, 'Sync complete');

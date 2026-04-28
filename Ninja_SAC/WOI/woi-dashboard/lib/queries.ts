@@ -196,6 +196,7 @@ export type Participant = {
   role: string
   confirmed_by_santi: boolean
   last_seen_at: string
+  is_primary: boolean
 }
 
 export type TicketStatus = 'abierto' | 'respondido' | 'resuelto' | 'escalado' | 'pendiente' | 'no_resuelto_eod'
@@ -581,11 +582,38 @@ export async function getGroupMessages(groupId: number, limit = 50): Promise<Mes
 export async function getGroupParticipants(groupId: number): Promise<Participant[]> {
   const { data, error } = await supabaseAdmin
     .from('participants')
-    .select('id, phone, display_name, role, confirmed_by_santi, last_seen_at')
+    .select('id, phone, display_name, role, confirmed_by_santi, last_seen_at, is_primary')
     .eq('group_id', groupId)
+    // Primarios primero, después agentes_99 normales, después clientes, después otros
+    .order('is_primary', { ascending: false })
     .order('role')
+    .order('display_name')
   if (error) return []
-  return data ?? []
+  return (data ?? []).map((r: any) => ({ ...r, is_primary: r.is_primary ?? false }))
+}
+
+export async function setParticipantPrimary(
+  participantId: number,
+  isPrimary: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  // Solo agentes_99 pueden ser primarios — el CHECK de la tabla lo enforza,
+  // pero validamos antes para devolver mejor error message.
+  if (isPrimary) {
+    const { data: row } = await supabaseAdmin
+      .from('participants')
+      .select('role')
+      .eq('id', participantId)
+      .single()
+    if (row?.role !== 'agente_99') {
+      return { ok: false, error: 'Solo los agentes 99 pueden marcarse como primarios. Cambia primero el rol.' }
+    }
+  }
+  const { error } = await supabaseAdmin
+    .from('participants')
+    .update({ is_primary: isPrimary })
+    .eq('id', participantId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
 }
 
 const INCIDENT_FIELDS = 'id, opened_at, closed_at, category, urgency, is_open, status, message_count, ttfr_seconds, ttr_seconds, owner_phone, summary, first_response_at, first_response_by, sentiment_avg, escalated_at, escalated_reason, resolution_source, resolution_reason'

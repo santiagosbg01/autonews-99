@@ -11,6 +11,7 @@ import NoiseBar from '@/app/components/NoiseBar'
 import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
 import BusinessHoursCard from '@/app/components/BusinessHoursCard'
 import OperationalContextCard from '@/app/components/OperationalContextCard'
+import ParticipantsList from '@/app/components/ParticipantsList'
 
 export const dynamic = 'force-dynamic'
 
@@ -45,19 +46,6 @@ function formatTime(ts: string) {
   })
 }
 
-function RoleBadge({ role }: { role: string }) {
-  const styles: Record<string, { bg: string; color: string; label: string }> = {
-    agente_99: { bg: 'var(--brand-blue-dim)', color: 'var(--brand-blue)', label: 'Agente 99' },
-    cliente:   { bg: 'var(--brand-green-dim)', color: 'var(--brand-green)', label: 'Cliente' },
-    otro:      { bg: 'var(--surface-2)', color: 'var(--text-muted)', label: 'Otro' },
-  }
-  const s = styles[role] ?? styles.otro
-  return (
-    <span style={{ background: s.bg, color: s.color, padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 600 }}>
-      {s.label}
-    </span>
-  )
-}
 
 export default async function GroupPage({ params, searchParams }: {
   params: Promise<{ id: string }>
@@ -90,7 +78,6 @@ export default async function GroupPage({ params, searchParams }: {
 
   const agents = participants.filter(p => p.role === 'agente_99')
   const clients = participants.filter(p => p.role === 'cliente')
-  const unclassified = participants.filter(p => p.role === 'otro')
   const openIncidents = incidents.filter(i => i.is_open)
   const analyzedMsgs = messages.filter(m => m.analysis)
   const bucketB = analyzedMsgs.filter(m => m.analysis?.bucket === 'B').length
@@ -274,28 +261,8 @@ export default async function GroupPage({ params, searchParams }: {
             timezone={group.timezone}
           />
 
-          {/* Participants */}
-          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ fontSize: 14, fontWeight: 600 }}>Participantes</h2>
-              {unclassified.length > 0 && (
-                <Link href={`/onboarding/${group.id}`} style={{ fontSize: 11, color: 'var(--orange)', textDecoration: 'none' }}>
-                  {unclassified.length} sin clasificar
-                </Link>
-              )}
-            </div>
-            <div style={{ maxHeight: 250, overflowY: 'auto' }}>
-              {participants.map(p => (
-                <div key={p.id} style={{ padding: '10px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 500 }}>{p.display_name ?? p.phone}</div>
-                    {p.display_name && <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.phone}</div>}
-                  </div>
-                  <RoleBadge role={p.role} />
-                </div>
-              ))}
-            </div>
-          </div>
+          {/* Participants — con toggle de "primario" inline */}
+          <ParticipantsList groupId={group.id} participants={participants} />
 
           {/* Client Sentiment */}
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>

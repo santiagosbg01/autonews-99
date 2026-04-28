@@ -37,8 +37,20 @@ export async function upsertGroup({ whatsappId, name }) {
 }
 
 /**
- * Upsert de participant. Auto-asigna role='agente_99' si el número está en known_agents.
- * Para números desconocidos, crea con role='otro' y deja confirmed_by_santi=false.
+ * Upsert de participant. Auto-asigna role='agente_99' si el número está en
+ * known_agents. Para números desconocidos, deja `role` e `is_primary` sin tocar
+ * para preservar lo que ya esté en la fila (clasificación manual o autopromote
+ * por presencia en >1 grupo).
+ *
+ * Reglas:
+ * - Si está en known_agents: forzamos role='agente_99' + display_name oficial
+ *   + confirmed_by_santi=true (override del usuario).
+ * - Si NO está en known_agents y la fila ya existe: solo refrescamos
+ *   last_seen_at y opcionalmente display_name (sólo si nos pasaron un valor
+ *   no-vacío — null no debe borrar un nombre ya editado).
+ * - Si NO está en known_agents y la fila es nueva: insertamos con role='otro'
+ *   por default. La auto-promoción a agente_99 (por presencia en >1 grupo)
+ *   se aplica posteriormente con `autoPromoteAgents()`.
  */
 export async function upsertParticipant({ groupId, phone, displayName }) {
   // Buscar en known_agents por sufijo de 10 dígitos
@@ -50,20 +62,30 @@ export async function upsertParticipant({ groupId, phone, displayName }) {
     .eq('is_active', true)
     .maybeSingle();
 
-  const upsertData = {
+  const payload = {
     group_id:     groupId,
     phone,
-    last_seen_at: new Date().toISOString(),
-    ...(knownAgent
-      ? { role: 'agente_99', display_name: knownAgent.display_name, confirmed_by_santi: true }
-      : { display_name: displayName ?? null }
-    )
+    last_seen_at: new Date().toISOString()
   };
+
+  if (knownAgent) {
+    // Override autoritativo: la whitelist manda.
+    payload.role = 'agente_99';
+    payload.display_name = knownAgent.display_name;
+    payload.confirmed_by_santi = true;
+  } else if (typeof displayName === 'string' && displayName.trim().length > 0) {
+    // Solo escribimos display_name cuando viene un valor real — null no debe
+    // sobrescribir un nombre ya cargado.
+    payload.display_name = displayName.trim();
+  }
+
+  // role e is_primary NO se incluyen en el payload cuando no aplican: el
+  // upsert hará UPDATE solo de los campos presentes, preservando el resto.
 
   const { data, error } = await supabase
     .from('participants')
-    .upsert(upsertData, { onConflict: 'group_id,phone', ignoreDuplicates: false })
-    .select('id, role')
+    .upsert(payload, { onConflict: 'group_id,phone', ignoreDuplicates: false })
+    .select('id, role, is_primary')
     .single();
 
   if (error) {
@@ -76,6 +98,47 @@ export async function upsertParticipant({ groupId, phone, displayName }) {
   }
 
   return data;
+}
+
+/**
+ * Promueve a `role='agente_99'` cualquier participante presente en >1 grupo
+ * cuyo role actual sea NULL u 'otro'. Útil después del sync de roster.
+ *
+ * Las personas marcadas manualmente como `cliente` se respetan (no se
+ * tocan), porque a veces un mismo KAM del cliente final está en varios chats
+ * del mismo cliente y NO es agente nuestro.
+ *
+ * Returns { promoted: N }.
+ */
+export async function autoPromoteAgents() {
+  const { data, error } = await supabase.rpc('woi_autopromote_agents');
+  if (error) {
+    // Fallback: si la RPC no existe (viejos entornos sin el helper SQL),
+    // ejecutamos el UPDATE inline. Requiere service role key (ya estamos
+    // usando ese client).
+    logger.warn({ err: error }, 'RPC woi_autopromote_agents not found; running inline UPDATE');
+    const { data: rows, error: e2 } = await supabase
+      .from('participants')
+      .select('phone')
+      .or('role.is.null,role.eq.otro');
+    if (e2) throw e2;
+    // Agrupar por phone y filtrar los con >1 group
+    const byPhone = new Map();
+    for (const r of rows ?? []) {
+      byPhone.set(r.phone, (byPhone.get(r.phone) ?? 0) + 1);
+    }
+    const targets = [...byPhone.entries()].filter(([, c]) => c > 1).map(([p]) => p);
+    if (targets.length === 0) return { promoted: 0 };
+    const { count, error: e3 } = await supabase
+      .from('participants')
+      .update({ role: 'agente_99', updated_at: new Date().toISOString() })
+      .in('phone', targets)
+      .or('role.is.null,role.eq.otro')
+      .select('id', { count: 'exact' });
+    if (e3) throw e3;
+    return { promoted: count ?? 0 };
+  }
+  return { promoted: data?.promoted ?? 0 };
 }
 
 /**
