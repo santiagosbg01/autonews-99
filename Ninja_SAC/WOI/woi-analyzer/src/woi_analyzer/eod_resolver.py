@@ -65,12 +65,17 @@ def _fetch_open_tickets_for_group(group_id: int) -> list[dict[str, Any]]:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, opened_at, category, urgency, status, first_response_at, timezone
-            FROM incidents
-            WHERE group_id = %s
-              AND closed_at IS NULL
-              AND status NOT IN ('resuelto','no_resuelto_eod')
-            ORDER BY opened_at ASC
+            SELECT i.id, i.opened_at, i.category, i.urgency, i.status,
+                   i.first_response_at, i.timezone,
+                   g.business_hour_start AS bh_start,
+                   g.business_hour_end   AS bh_end,
+                   g.business_days       AS bh_days
+            FROM incidents i
+            JOIN groups g ON g.id = i.group_id
+            WHERE i.group_id = %s
+              AND i.closed_at IS NULL
+              AND i.status NOT IN ('resuelto','no_resuelto_eod')
+            ORDER BY i.opened_at ASC
             LIMIT %s
             """,
             (group_id, MAX_TICKETS_PER_GROUP),
@@ -101,9 +106,15 @@ def _close_resolved(
     prev_status: str | None,
     opened_at: datetime,
     tz_name: str | None,
+    bh_start: int | None = None,
+    bh_end: int | None = None,
+    bh_days: list[str] | None = None,
 ) -> None:
     closed_now = datetime.now().astimezone()
-    ttr_sec = business_seconds_between(opened_at, closed_now, tz_name)
+    ttr_sec = business_seconds_between(
+        opened_at, closed_now, tz_name,
+        hour_start=bh_start, hour_end=bh_end, days=bh_days,
+    )
     cur.execute(
         """
         UPDATE incidents
@@ -133,10 +144,16 @@ def _close_unresolved_eod(
     prev_status: str | None,
     opened_at: datetime,
     tz_name: str | None,
+    bh_start: int | None = None,
+    bh_end: int | None = None,
+    bh_days: list[str] | None = None,
 ) -> None:
     fallback = reason or "Cerró el día sin evidencia de resolución de la queja original."
     closed_now = datetime.now().astimezone()
-    ttr_sec = business_seconds_between(opened_at, closed_now, tz_name)
+    ttr_sec = business_seconds_between(
+        opened_at, closed_now, tz_name,
+        hour_start=bh_start, hour_end=bh_end, days=bh_days,
+    )
     cur.execute(
         """
         UPDATE incidents
@@ -185,6 +202,9 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
         prev_status = t.get("status")
         opened_at = t["opened_at"]
         tz_name = t.get("timezone")
+        bh_start = t.get("bh_start")
+        bh_end = t.get("bh_end")
+        bh_days = t.get("bh_days")
         try:
             msgs = _fetch_thread(incident_id)
             if not msgs:
@@ -194,6 +214,7 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
                         cur, incident_id,
                         "Ticket sin mensajes asociados al cierre del día.",
                         prev_status, opened_at, tz_name,
+                        bh_start, bh_end, bh_days,
                     )
                     conn.commit()
                 unresolved += 1
@@ -204,13 +225,13 @@ def run_eod_pass_for_group(group_id: int, group_name: str) -> dict[str, Any]:
                 if verdict["resolved"]:
                     _close_resolved(
                         cur, incident_id, verdict["reason"], prev_status,
-                        opened_at, tz_name,
+                        opened_at, tz_name, bh_start, bh_end, bh_days,
                     )
                     resolved += 1
                 else:
                     _close_unresolved_eod(
                         cur, incident_id, verdict["reason"], prev_status,
-                        opened_at, tz_name,
+                        opened_at, tz_name, bh_start, bh_end, bh_days,
                     )
                     unresolved += 1
                 conn.commit()

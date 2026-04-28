@@ -95,6 +95,11 @@ class IncidentCandidate:
     sentiment_end: float | None
     sentiment_avg: float | None
     timezone: str | None
+    # Per-group business hours config (leído de groups.business_hour_*).
+    # None → caer en defaults globales del env en business_hours.py.
+    business_hour_start: int | None = None
+    business_hour_end: int | None = None
+    business_days: list[str] | None = None
     # Why/how this incident was closed (used only when closed_at is set).
     # 'agent_signal' = strong/weak close from agente_99, 'customer_signal' = strong
     # close from a non-agent (cliente confirmed delivery, etc.). None when still open.
@@ -113,7 +118,10 @@ def _fetch_group_messages_for_reconstruction(group_id: int, since: datetime) -> 
             m.content,
             a.category, a.bucket, a.sentiment, a.urgency,
             a.is_incident_open, a.is_incident_close, a.incident_id,
-            g.timezone AS group_tz
+            g.timezone            AS group_tz,
+            g.business_hour_start AS bh_start,
+            g.business_hour_end   AS bh_end,
+            g.business_days       AS bh_days
         FROM messages m
         JOIN analysis a ON a.message_id = m.id
         JOIN groups g   ON g.id = m.group_id
@@ -168,6 +176,9 @@ def _reconstruct_group(group_id: int, since: datetime) -> list[IncidentCandidate
                 sentiment_end=sentiment,
                 sentiment_avg=sentiment,
                 timezone=m["group_tz"],
+                business_hour_start=m.get("bh_start"),
+                business_hour_end=m.get("bh_end"),
+                business_days=m.get("bh_days"),
             )
             continue
 
@@ -252,17 +263,21 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
     with connect() as conn, conn.cursor() as cur:
         for c in candidates:
             # TTFR / TTR se miden en SEGUNDOS DE HORARIO LABORAL (business_hours.py)
-            # del timezone del grupo. Esto evita inflar las métricas con horas no
-            # operativas (madrugada, fin de semana opcional) y garantiza que
-            # TTR ≥ TTFR a nivel ticket porque ambos parten de opened_at y
-            # first_response_at ≤ closed_at siempre.
+            # con la ventana específica del grupo (groups.business_hour_*). Esto
+            # garantiza que TTR ≥ TTFR a nivel ticket y evita inflar métricas
+            # con horas no operativas según la operación de cada cliente.
+            bh_kwargs = dict(
+                hour_start=c.business_hour_start,
+                hour_end=c.business_hour_end,
+                days=c.business_days,
+            )
             ttfr = (
-                business_seconds_between(c.opened_at, c.first_response_at, c.timezone)
+                business_seconds_between(c.opened_at, c.first_response_at, c.timezone, **bh_kwargs)
                 if c.first_response_at
                 else None
             )
             ttr = (
-                business_seconds_between(c.opened_at, c.closed_at, c.timezone)
+                business_seconds_between(c.opened_at, c.closed_at, c.timezone, **bh_kwargs)
                 if c.closed_at
                 else None
             )
@@ -378,13 +393,18 @@ def _upsert_incidents(candidates: list[IncidentCandidate]) -> int:
             try:
                 msgs = fetch_incident_messages(c.message_ids)
                 if msgs:
+                    bh_kwargs = dict(
+                        hour_start=c.business_hour_start,
+                        hour_end=c.business_hour_end,
+                        days=c.business_days,
+                    )
                     ttfr_sec = (
-                        business_seconds_between(c.opened_at, c.first_response_at, c.timezone)
+                        business_seconds_between(c.opened_at, c.first_response_at, c.timezone, **bh_kwargs)
                         if c.first_response_at
                         else None
                     )
                     ttr_sec = (
-                        business_seconds_between(c.opened_at, c.closed_at, c.timezone)
+                        business_seconds_between(c.opened_at, c.closed_at, c.timezone, **bh_kwargs)
                         if c.closed_at
                         else None
                     )
@@ -437,18 +457,22 @@ def refresh_open_ticket_statuses() -> int:
     inactivity_cutoff = now - timedelta(hours=INACTIVITY_RESOLVE_HOURS)
 
     with connect() as conn, conn.cursor() as cur:
-        # Fetch open/in-progress tickets + last message timestamp + tz
+        # Fetch open/in-progress tickets + last message timestamp + tz + business hours del grupo
         cur.execute(
             """
             SELECT
                 i.id, i.opened_at, i.first_response_at, i.closed_at,
                 i.urgency, i.status, i.escalated_at, i.timezone,
+                g.business_hour_start AS bh_start,
+                g.business_hour_end   AS bh_end,
+                g.business_days       AS bh_days,
                 MAX(m.timestamp) AS last_msg_at
             FROM incidents i
+            JOIN groups g ON g.id = i.group_id
             LEFT JOIN analysis a ON a.incident_id = i.id
             LEFT JOIN messages m ON m.id = a.message_id
             WHERE i.closed_at IS NULL
-            GROUP BY i.id
+            GROUP BY i.id, g.business_hour_start, g.business_hour_end, g.business_days
             ORDER BY i.opened_at DESC
             """
         )
@@ -470,7 +494,10 @@ def refresh_open_ticket_statuses() -> int:
             ):
                 reason = f"Sin actividad por {INACTIVITY_RESOLVE_HOURS}h tras respuesta del agente."
                 ttr_sec = business_seconds_between(
-                    row["opened_at"], last_msg_at, row.get("timezone")
+                    row["opened_at"], last_msg_at, row.get("timezone"),
+                    hour_start=row.get("bh_start"),
+                    hour_end=row.get("bh_end"),
+                    days=row.get("bh_days"),
                 )
                 cur.execute(
                     """
@@ -537,8 +564,12 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT i.id, i.opened_at, i.category, i.urgency, i.status, i.timezone
+            SELECT i.id, i.opened_at, i.category, i.urgency, i.status, i.timezone,
+                   g.business_hour_start AS bh_start,
+                   g.business_hour_end   AS bh_end,
+                   g.business_days       AS bh_days
             FROM incidents i
+            JOIN groups g ON g.id = i.group_id
             WHERE i.status NOT IN ('resuelto', 'escalado', 'no_resuelto_eod')
               AND i.closed_at IS NULL
               AND i.opened_at < %s
@@ -583,7 +614,10 @@ def _sonnet_resolution_pass(now: datetime, cutoff: datetime) -> int:
                 if verdict["resolved"] and verdict["confidence"] in ("alta", "media"):
                     closed_now = datetime.now().astimezone()
                     ttr_sec = business_seconds_between(
-                        ticket["opened_at"], closed_now, ticket.get("timezone")
+                        ticket["opened_at"], closed_now, ticket.get("timezone"),
+                        hour_start=ticket.get("bh_start"),
+                        hour_end=ticket.get("bh_end"),
+                        days=ticket.get("bh_days"),
                     )
                     cur3.execute(
                         """

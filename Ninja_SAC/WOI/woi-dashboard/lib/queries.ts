@@ -165,6 +165,9 @@ export type GroupDetail = {
   timezone: string
   notes: string | null
   joined_at: string
+  business_hour_start: number
+  business_hour_end: number
+  business_days: string[]
 }
 
 export type MessageRow = {
@@ -494,11 +497,47 @@ export async function getGroupHealth(groupId: number): Promise<HealthScore> {
 export async function getGroupDetail(id: number): Promise<GroupDetail | null> {
   const { data, error } = await supabaseAdmin
     .from('groups')
-    .select('id, name, whatsapp_id, pilot_cohort, timezone, notes, joined_at')
+    .select('id, name, whatsapp_id, pilot_cohort, timezone, notes, joined_at, business_hour_start, business_hour_end, business_days')
     .eq('id', id)
     .single()
   if (error) return null
   return data
+}
+
+export const VALID_BUSINESS_DAYS = ['mon','tue','wed','thu','fri','sat','sun'] as const
+export type BusinessDay = typeof VALID_BUSINESS_DAYS[number]
+
+export async function updateGroupBusinessHours(
+  groupId: number,
+  hourStart: number,
+  hourEnd: number,
+  days: string[],
+): Promise<{ ok: boolean; error?: string }> {
+  if (!Number.isInteger(hourStart) || hourStart < 0 || hourStart > 23) {
+    return { ok: false, error: 'business_hour_start fuera de rango (0-23)' }
+  }
+  if (!Number.isInteger(hourEnd) || hourEnd < 1 || hourEnd > 24) {
+    return { ok: false, error: 'business_hour_end fuera de rango (1-24)' }
+  }
+  if (hourEnd <= hourStart) {
+    return { ok: false, error: 'business_hour_end debe ser > business_hour_start' }
+  }
+  const validDays = days.filter((d): d is BusinessDay =>
+    (VALID_BUSINESS_DAYS as readonly string[]).includes(d)
+  )
+  if (validDays.length === 0) {
+    return { ok: false, error: 'Selecciona al menos un día laboral' }
+  }
+  const { error } = await supabaseAdmin
+    .from('groups')
+    .update({
+      business_hour_start: hourStart,
+      business_hour_end: hourEnd,
+      business_days: validDays,
+    })
+    .eq('id', groupId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
 }
 
 export async function getGroupMessages(groupId: number, limit = 50): Promise<MessageRow[]> {

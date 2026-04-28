@@ -9,6 +9,7 @@ import HealthScoreCard from '@/app/components/HealthScoreCard'
 import ChurnAlertBanner from '@/app/components/ChurnAlertBanner'
 import NoiseBar from '@/app/components/NoiseBar'
 import MultiWeekTrendCard from '@/app/components/MultiWeekTrendCard'
+import BusinessHoursCard from '@/app/components/BusinessHoursCard'
 
 export const dynamic = 'force-dynamic'
 
@@ -251,6 +252,15 @@ export default async function GroupPage({ params, searchParams }: {
               ))}
             </div>
           </div>
+
+          {/* Business hours */}
+          <BusinessHoursCard
+            groupId={group.id}
+            initialStart={group.business_hour_start}
+            initialEnd={group.business_hour_end}
+            initialDays={group.business_days}
+            timezone={group.timezone}
+          />
 
           {/* Participants */}
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
