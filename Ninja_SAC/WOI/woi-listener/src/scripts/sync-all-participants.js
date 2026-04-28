@@ -32,7 +32,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { upsertGroup, upsertParticipant } from '../supabase.js';
+import { upsertGroup, upsertParticipant, reconcileGroupParticipants } from '../supabase.js';
 
 const log = logger.child({ module: 'sync-participants' });
 
@@ -168,8 +168,15 @@ async function main() {
     participants: 0,
     agentsAuto: 0,
     skippedNoPhone: 0,
+    deletedStale: 0,
     errors: 0
   };
+
+  // CLI flags:
+  //   --no-reconcile  → solo upsert, no borrar (modo legacy)
+  const args = new Set(process.argv.slice(2));
+  const reconcile = !args.has('--no-reconcile');
+  log.info({ reconcile, groupCount: groups.length }, 'Sync mode');
 
   for (const g of groups) {
     try {
@@ -183,6 +190,10 @@ async function main() {
         },
         'Syncing group roster'
       );
+
+      // Phones canónicos del grupo según el snapshot fresco de Baileys.
+      // Sólo E.164 válidos — extractPhone descarta @lid, @broadcast, etc.
+      const canonicalPhones = [];
 
       for (const member of members) {
         const phone = extractPhone(member);
@@ -202,11 +213,36 @@ async function main() {
           });
           stats.participants += 1;
           if (p?.role === 'agente_99') stats.agentsAuto += 1;
+          canonicalPhones.push(phone);
         } catch (err) {
           stats.errors += 1;
           log.warn({ err, phone, group: g.subject }, 'Failed to upsert participant');
         }
       }
+
+      // Reconciliación: borrar participantes que ya no están en el grupo
+      // (incluye LIDs legacy y gente que salió). Solo se ejecuta si todo el
+      // upsert anterior fue exitoso, para no borrar por error en caso de un
+      // snapshot parcial.
+      if (reconcile) {
+        try {
+          const { deleted } = await reconcileGroupParticipants({
+            groupId: groupRow.id,
+            keepPhones: canonicalPhones
+          });
+          if (deleted > 0) {
+            stats.deletedStale += deleted;
+            log.info(
+              { group: g.subject, deleted, kept: canonicalPhones.length },
+              'Reconciled: removed stale participants'
+            );
+          }
+        } catch (err) {
+          stats.errors += 1;
+          log.warn({ err, group: g.subject }, 'Failed to reconcile group participants');
+        }
+      }
+
       stats.groupsSynced += 1;
     } catch (err) {
       stats.errors += 1;

@@ -79,6 +79,48 @@ export async function upsertParticipant({ groupId, phone, displayName }) {
 }
 
 /**
+ * Reconcilia los participantes de un grupo contra una lista canónica de phones
+ * (la fuente de verdad: el snapshot fresco de Baileys). Borra todos los rows de
+ * `participants` para `groupId` cuyo `phone` NO esté en `keepPhones`.
+ *
+ * Esto limpia:
+ *   - LIDs legacy (cualquier non-E.164 que quedó de versiones previas).
+ *   - Gente que ya no está en el grupo (left/kicked).
+ *   - Cualquier registro fantasma.
+ *
+ * Devuelve { deleted: N }.
+ *
+ * IMPORTANTE: solo llamar después de un upsert exitoso de TODOS los miembros
+ * actuales del grupo. Si llamas con `keepPhones=[]` por error vas a borrar
+ * todos los participantes.
+ */
+export async function reconcileGroupParticipants({ groupId, keepPhones }) {
+  if (!Array.isArray(keepPhones)) {
+    throw new Error('keepPhones must be an array');
+  }
+  // PostgREST requiere lista no vacía para `.not('phone','in', list)`.
+  // Si keepPhones está vacío, eso significa que el grupo realmente está vacío
+  // (o sólo somos nosotros y el bot no se cuenta), y queremos borrar todo.
+  let query = supabase.from('participants').delete().eq('group_id', groupId);
+  if (keepPhones.length > 0) {
+    // Construir el filtro `phone=not.in.(p1,p2,...)` manualmente para evitar
+    // problemas con phones que tengan caracteres especiales (no debería
+    // ocurrir porque ya validamos E.164, pero defensa en profundidad).
+    const sanitized = keepPhones
+      .filter((p) => /^[0-9]+$/.test(p))
+      .map((p) => `"${p}"`)
+      .join(',');
+    query = query.not('phone', 'in', `(${sanitized})`);
+  }
+  const { data, error, count } = await query.select('id', { count: 'exact' });
+  if (error) {
+    logger.error({ err: error, groupId, keep: keepPhones.length }, 'reconcile delete failed');
+    throw error;
+  }
+  return { deleted: count ?? (data?.length ?? 0) };
+}
+
+/**
  * Insert de mensaje. Idempotente por whatsapp_msg_id (UNIQUE).
  * Devuelve null si el mensaje ya existía (dedupe).
  */
